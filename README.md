@@ -21,3 +21,7 @@ The API accepts only endpoint enrollment, inventory readback, heartbeat, and rev
 ## Device leases (foundation only)
 
 The admin API can acquire one exclusive lease per online endpoint with `POST /v1/device-leases`; leases bind tenant, task/run references, holder and `read_only` or `control` mode, and expire after 1–3600 seconds. Conflicts return `409 device_busy` with the current holder/task references. Release is tenant-scoped through `DELETE /v1/device-leases/{lease_id}?tenant_ref=...`; expired leases are reclaimed on the next acquisition, and endpoint revocation releases active leases. This is a concurrency primitive, not a complete authorization policy: the deployment-wide admin token still authorizes these calls, and device actions remain unavailable until approval/policy enforcement is added.
+
+## Policy evaluation (pre-execution gate)
+
+`POST /v1/policy/evaluate` requires the admin service credential and a live lease matching endpoint and tenant. It returns `allow`, `ask`, or `deny`; read-only leases deny non-read actions, sensitive app identifiers and password/OTP/secret targets deny, known high-impact actions return ask, and unknown mutations default to ask. This is an initial deterministic baseline. It is not an approval workflow and its result does not execute or authorize a hardware action; do not expose it as a user-scoped production policy API until the admin service identity and policy profiles are replaced with the platform authorization contract.

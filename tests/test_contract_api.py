@@ -70,3 +70,24 @@ def test_device_lease_is_exclusive_tenant_scoped_and_releasable(tmp_path, monkey
     wrong_tenant = client.delete(f"/v1/device-leases/{first.json()['lease_id']}?tenant_ref=tenant-b", headers=admin)
     assert wrong_tenant.status_code == 404
     assert client.delete(f"/v1/device-leases/{first.json()['lease_id']}?tenant_ref=tenant-a", headers=admin).status_code == 200
+
+
+def test_policy_requires_active_lease_and_applies_safe_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEVICE_CONTROL_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("DEVICE_CONTROL_DB", str(tmp_path / "policy.sqlite3"))
+    admin = {"Authorization": "Bearer test-admin-token"}
+    enrolled = client.post("/v1/endpoints", json={
+        "endpoint_id": "phone-policy", "tenant_ref": "tenant-p", "protocol_version": "v1", "capabilities": []
+    }, headers=admin).json()
+    client.post("/v1/endpoints/phone-policy/heartbeat", json={"status": "online", "capabilities": []},
+                headers={"Authorization": f"Bearer {enrolled['credential']}"})
+    lease = client.post("/v1/device-leases", json={"endpoint_id":"phone-policy","tenant_ref":"tenant-p","task_ref":"task-p","holder_ref":"agent-p","mode":"read_only","ttl_seconds":60},headers=admin).json()
+    body = {"endpoint_id":"phone-policy","tenant_ref":"tenant-p","lease_id":lease["lease_id"],"action_type":"tap","intent":"Tap continue"}
+    assert client.post("/v1/policy/evaluate", json={**body, "lease_id":"invalid"}, headers=admin).status_code == 403
+    assert client.post("/v1/policy/evaluate", json=body, headers=admin).json()["decision"] == "deny"
+    body["action_type"] = "observe"
+    assert client.post("/v1/policy/evaluate", json=body, headers=admin).json()["decision"] == "allow"
+    body.update(action_type="send", app_id="mail", target_type="text")
+    assert client.post("/v1/policy/evaluate", json=body, headers=admin).json()["decision"] == "deny"
+    body.update(action_type="observe", app_id="banking-app", target_type="text")
+    assert client.post("/v1/policy/evaluate", json=body, headers=admin).json()["reason"] == "sensitive_app_blocked"

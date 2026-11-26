@@ -131,3 +131,11 @@ def release_lease(lease_id: str, tenant_ref: str) -> bool:
         cursor = db.execute("UPDATE device_leases SET released_at=? WHERE lease_id=? AND tenant_ref=? AND released_at IS NULL",
                             (now, lease_id, tenant_ref))
         return cursor.rowcount > 0
+
+
+def active_lease(lease_id: str, tenant_ref: str, endpoint_id: str) -> dict[str, Any] | None:
+    now = datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        row = db.execute("SELECT * FROM device_leases WHERE lease_id=? AND tenant_ref=? AND endpoint_id=? AND released_at IS NULL AND expires_at>?",
+                         (lease_id, tenant_ref, endpoint_id, now)).fetchone()
+    return dict(row) if row else None

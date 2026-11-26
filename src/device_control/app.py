@@ -12,6 +12,7 @@ from fastapi import FastAPI, Header, HTTPException
 from jsonschema import Draft202012Validator, FormatChecker, RefResolver
 
 from device_control import store
+from device_control.policy import evaluate
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_DIR = ROOT / "contracts" / "v1"
@@ -183,3 +184,14 @@ def release_device_lease(lease_id: str, tenant_ref: str, authorization: str | No
     if not store.release_lease(lease_id, tenant_ref):
         raise HTTPException(status_code=404, detail="lease_not_found")
     return {"lease_id": lease_id, "status": "released"}
+
+
+@app.post("/v1/policy/evaluate", tags=["policy"])
+def evaluate_policy(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, str]:
+    require_admin(authorization)
+    lease = store.active_lease(payload.get("lease_id", ""), payload.get("tenant_ref", ""), payload.get("endpoint_id", ""))
+    if lease is None:
+        raise HTTPException(status_code=403, detail="active_device_lease_required")
+    if not payload.get("action_type") or not payload.get("intent"):
+        raise HTTPException(status_code=422, detail="action_type_and_intent_required")
+    return evaluate(payload, lease_mode=lease["mode"])
