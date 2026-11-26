@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hmac
 import os
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -152,3 +153,33 @@ def revoke_endpoint(endpoint_id: str, authorization: str | None = Header(default
     if not store.revoke(endpoint_id):
         raise HTTPException(status_code=404, detail="endpoint_not_found")
     return {"endpoint_id": endpoint_id, "status": "revoked"}
+
+
+@app.post("/v1/device-leases", tags=["leases"], status_code=201)
+def acquire_device_lease(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    require_admin(authorization)
+    required = {"endpoint_id", "tenant_ref", "task_ref", "holder_ref", "mode", "ttl_seconds"}
+    if required - payload.keys() or payload.get("mode") not in {"read_only", "control"}:
+        raise HTTPException(status_code=422, detail="invalid_lease_request")
+    ttl = payload["ttl_seconds"]
+    if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl < 1 or ttl > 3600:
+        raise HTTPException(status_code=422, detail="ttl_seconds_must_be_between_1_and_3600")
+    now = datetime.now(timezone.utc)
+    lease = store.acquire_lease(
+        lease_id=secrets.token_urlsafe(18), endpoint_id=payload["endpoint_id"], tenant_ref=payload["tenant_ref"],
+        task_ref=payload["task_ref"], run_ref=payload.get("run_ref"), holder_ref=payload["holder_ref"],
+        mode=payload["mode"], expires_at=datetime.fromtimestamp(now.timestamp() + ttl, timezone.utc).isoformat(),
+    )
+    if lease is None:
+        raise HTTPException(status_code=404, detail="endpoint_not_found_or_unavailable")
+    if lease.get("conflict"):
+        raise HTTPException(status_code=409, detail={"code": "device_busy", "holder_ref": lease["holder_ref"], "task_ref": lease["task_ref"]})
+    return lease
+
+
+@app.delete("/v1/device-leases/{lease_id}", tags=["leases"])
+def release_device_lease(lease_id: str, tenant_ref: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    require_admin(authorization)
+    if not store.release_lease(lease_id, tenant_ref):
+        raise HTTPException(status_code=404, detail="lease_not_found")
+    return {"lease_id": lease_id, "status": "released"}

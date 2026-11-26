@@ -51,3 +51,22 @@ def test_endpoint_enrollment_heartbeat_list_and_revoke(tmp_path, monkeypatch):
     assert client.delete("/v1/endpoints/phone-1", headers=admin).json()["status"] == "revoked"
     assert client.post("/v1/endpoints/phone-1/heartbeat", json={"status": "online", "capabilities": []},
                        headers={"Authorization": f"Bearer {credential}"}).status_code == 401
+
+
+def test_device_lease_is_exclusive_tenant_scoped_and_releasable(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEVICE_CONTROL_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("DEVICE_CONTROL_DB", str(tmp_path / "leases.sqlite3"))
+    admin = {"Authorization": "Bearer test-admin-token"}
+    enrolled = client.post("/v1/endpoints", json={
+        "endpoint_id": "phone-lease", "tenant_ref": "tenant-a", "protocol_version": "v1", "capabilities": []
+    }, headers=admin).json()
+    client.post("/v1/endpoints/phone-lease/heartbeat", json={"status": "online", "capabilities": []},
+                headers={"Authorization": f"Bearer {enrolled['credential']}"})
+    first = client.post("/v1/device-leases", json={"endpoint_id":"phone-lease","tenant_ref":"tenant-a","task_ref":"task-1","holder_ref":"agent-1","mode":"control","ttl_seconds":60},headers=admin)
+    assert first.status_code == 201
+    conflict = client.post("/v1/device-leases", json={"endpoint_id":"phone-lease","tenant_ref":"tenant-a","task_ref":"task-2","holder_ref":"agent-2","mode":"read_only","ttl_seconds":60},headers=admin)
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["holder_ref"] == "agent-1"
+    wrong_tenant = client.delete(f"/v1/device-leases/{first.json()['lease_id']}?tenant_ref=tenant-b", headers=admin)
+    assert wrong_tenant.status_code == 404
+    assert client.delete(f"/v1/device-leases/{first.json()['lease_id']}?tenant_ref=tenant-a", headers=admin).status_code == 200
