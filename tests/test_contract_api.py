@@ -91,3 +91,19 @@ def test_policy_requires_active_lease_and_applies_safe_defaults(tmp_path, monkey
     assert client.post("/v1/policy/evaluate", json=body, headers=admin).json()["decision"] == "deny"
     body.update(action_type="observe", app_id="banking-app", target_type="text")
     assert client.post("/v1/policy/evaluate", json=body, headers=admin).json()["reason"] == "sensitive_app_blocked"
+
+
+def test_approval_is_bound_to_exact_action_and_single_use(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEVICE_CONTROL_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("DEVICE_CONTROL_DB", str(tmp_path / "approval.sqlite3"))
+    admin = {"Authorization": "Bearer test-admin-token"}
+    enrolled = client.post("/v1/endpoints", json={"endpoint_id":"phone-approval","tenant_ref":"tenant-x","protocol_version":"v1","capabilities":[]},headers=admin).json()
+    client.post("/v1/endpoints/phone-approval/heartbeat",json={"status":"online","capabilities":[]},headers={"Authorization":f"Bearer {enrolled['credential']}"})
+    lease = client.post("/v1/device-leases",json={"endpoint_id":"phone-approval","tenant_ref":"tenant-x","task_ref":"task-x","holder_ref":"agent-x","mode":"control","ttl_seconds":60},headers=admin).json()
+    action = {"action_type":"send","intent":"Send message","app_id":"mail","target_ref":"button-1","screen_sha256":"abc123"}
+    request = client.post("/v1/approvals",json={"tenant_ref":"tenant-x","endpoint_id":"phone-approval","lease_id":lease["lease_id"],"requester_ref":"agent-x","action":action},headers=admin).json()
+    assert client.post(f"/v1/approvals/{request['approval_id']}/decision",json={"tenant_ref":"tenant-x","approver_ref":"agent-x","approved":True},headers=admin).status_code == 409
+    assert client.post(f"/v1/approvals/{request['approval_id']}/decision",json={"tenant_ref":"tenant-x","approver_ref":"human-x","approved":True},headers=admin).status_code == 200
+    consume = {"tenant_ref":"tenant-x","endpoint_id":"phone-approval","lease_id":lease["lease_id"],"action":action}
+    assert client.post(f"/v1/approvals/{request['approval_id']}/consume",json=consume,headers=admin).status_code == 200
+    assert client.post(f"/v1/approvals/{request['approval_id']}/consume",json=consume,headers=admin).status_code == 409

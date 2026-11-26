@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hmac
+import hashlib
 import os
 import secrets
 from datetime import datetime, timezone
@@ -195,3 +196,42 @@ def evaluate_policy(payload: dict[str, Any], authorization: str | None = Header(
     if not payload.get("action_type") or not payload.get("intent"):
         raise HTTPException(status_code=422, detail="action_type_and_intent_required")
     return evaluate(payload, lease_mode=lease["mode"])
+
+
+@app.post("/v1/approvals", tags=["approvals"], status_code=201)
+def request_approval(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, str]:
+    require_admin(authorization)
+    required = {"tenant_ref", "endpoint_id", "lease_id", "requester_ref", "action"}
+    if required - payload.keys() or not isinstance(payload.get("action"), dict):
+        raise HTTPException(status_code=422, detail="invalid_approval_request")
+    lease = store.active_lease(payload["lease_id"], payload["tenant_ref"], payload["endpoint_id"])
+    if not lease:
+        raise HTTPException(status_code=403, detail="active_device_lease_required")
+    digest = hashlib.sha256(json.dumps(payload["action"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    approval_id = secrets.token_urlsafe(18)
+    expires_at = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + 300, timezone.utc).isoformat()
+    store.create_approval(approval_id, payload["tenant_ref"], payload["endpoint_id"], payload["lease_id"], payload["requester_ref"], digest, expires_at)
+    return {"approval_id": approval_id, "status": "pending", "action_sha256": digest, "expires_at": expires_at}
+
+
+@app.post("/v1/approvals/{approval_id}/decision", tags=["approvals"])
+def decide_approval(approval_id: str, payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, str]:
+    require_admin(authorization)
+    if not payload.get("tenant_ref") or not payload.get("approver_ref") or not isinstance(payload.get("approved"), bool):
+        raise HTTPException(status_code=422, detail="invalid_approval_decision")
+    if not store.decide_approval(approval_id, payload["tenant_ref"], payload["approver_ref"], payload["approved"]):
+        raise HTTPException(status_code=409, detail="approval_not_decidable")
+    return {"approval_id": approval_id, "status": "approved" if payload["approved"] else "denied"}
+
+
+@app.post("/v1/approvals/{approval_id}/consume", tags=["approvals"])
+def consume_approval(approval_id: str, payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, str]:
+    require_admin(authorization)
+    action = payload.get("action")
+    if not isinstance(action, dict):
+        raise HTTPException(status_code=422, detail="action_required")
+    digest = hashlib.sha256(json.dumps(action, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    consumed = store.consume_approval(approval_id, payload.get("tenant_ref", ""), payload.get("endpoint_id", ""), payload.get("lease_id", ""), digest)
+    if not consumed:
+        raise HTTPException(status_code=409, detail="approval_stale_or_already_consumed")
+    return {"approval_id": approval_id, "status": "consumed"}

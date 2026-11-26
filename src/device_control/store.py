@@ -41,6 +41,18 @@ def connect() -> sqlite3.Connection:
         released_at TEXT
     )""")
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_device_active_lease ON device_leases(endpoint_id) WHERE released_at IS NULL")
+    db.execute("""CREATE TABLE IF NOT EXISTS device_approvals (
+        approval_id TEXT PRIMARY KEY,
+        tenant_ref TEXT NOT NULL,
+        endpoint_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        requester_ref TEXT NOT NULL,
+        action_digest TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','approved','denied','consumed','expired')),
+        approver_ref TEXT,
+        expires_at TEXT NOT NULL,
+        decided_at TEXT
+    )""")
     return db
 
 
@@ -139,3 +151,29 @@ def active_lease(lease_id: str, tenant_ref: str, endpoint_id: str) -> dict[str, 
         row = db.execute("SELECT * FROM device_leases WHERE lease_id=? AND tenant_ref=? AND endpoint_id=? AND released_at IS NULL AND expires_at>?",
                          (lease_id, tenant_ref, endpoint_id, now)).fetchone()
     return dict(row) if row else None
+
+
+def create_approval(approval_id: str, tenant_ref: str, endpoint_id: str, lease_id: str,
+                    requester_ref: str, action_digest: str, expires_at: str) -> None:
+    with connect() as db:
+        db.execute("INSERT INTO device_approvals VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL)",
+                   (approval_id, tenant_ref, endpoint_id, lease_id, requester_ref, action_digest, expires_at))
+
+
+def decide_approval(approval_id: str, tenant_ref: str, approver_ref: str, approved: bool) -> bool:
+    now = datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        row = db.execute("SELECT * FROM device_approvals WHERE approval_id=? AND tenant_ref=?", (approval_id, tenant_ref)).fetchone()
+        if not row or row["status"] != "pending" or row["requester_ref"] == approver_ref or row["expires_at"] <= now:
+            return False
+        db.execute("UPDATE device_approvals SET status=?, approver_ref=?, decided_at=? WHERE approval_id=?",
+                   ("approved" if approved else "denied", approver_ref, now, approval_id))
+        return True
+
+
+def consume_approval(approval_id: str, tenant_ref: str, endpoint_id: str, lease_id: str, action_digest: str) -> bool:
+    now = datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        cursor = db.execute("UPDATE device_approvals SET status='consumed' WHERE approval_id=? AND tenant_ref=? AND endpoint_id=? AND lease_id=? AND action_digest=? AND status='approved' AND expires_at>?",
+                             (approval_id, tenant_ref, endpoint_id, lease_id, action_digest, now))
+        return cursor.rowcount == 1
