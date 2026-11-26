@@ -1,0 +1,30 @@
+id: device-control
+name: Device Control
+version: 1
+type: ai-product
+owner: ai-platform
+requires:
+  platform_version: "014"
+  capabilities:
+    - authenticated-edge-channel
+consumes:
+  capabilities:
+    - device-endpoint-contract
+    - device-invocation-contract
+    - device-result-contract
+    - authenticated-edge-channel
+exports:
+  capabilities:
+    - governed-device-control
+agents: []
+skills: []
+interfaces:
+  mcp: false
+  api: true
+deployment:
+  profiles:
+    - standalone
+governance:
+  security: tenant-scoped
+  audit: true
+  tenant: true

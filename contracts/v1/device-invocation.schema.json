@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/device-invocation.v1.schema.json",
+  "title": "Device Capability Invocation",
+  "description": "Typed, bounded request envelope. Authorization and policy decisions remain with the owning service and endpoint.",
+  "type": "object",
+  "required": ["request_id", "tenant_ref", "endpoint_id", "capability_id", "capability_version", "requested_by", "deadline", "idempotency_key", "input"],
+  "properties": {
+    "request_id": {"type": "string", "minLength": 1},
+    "tenant_ref": {"type": "string", "minLength": 1},
+    "endpoint_id": {"type": "string", "minLength": 1},
+    "task_ref": {"type": ["string", "null"]},
+    "run_ref": {"type": ["string", "null"]},
+    "capability_id": {"type": "string", "minLength": 1},
+    "capability_version": {"type": "string", "minLength": 1},
+    "requested_by": {"type": "string", "minLength": 1},
+    "intent": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "deadline": {"type": "string", "format": "date-time"},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "input": {"type": "object"},
+    "lease_ref": {"type": ["string", "null"]},
+    "approval_ref": {"type": ["string", "null"]},
+    "correlation_id": {"type": ["string", "null"]}
+  },
+  "additionalProperties": false
+}

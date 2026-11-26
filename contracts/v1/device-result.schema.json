@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/device-result.v1.schema.json",
+  "title": "Device Capability Result",
+  "type": "object",
+  "required": ["request_id", "endpoint_id", "status", "completed_at"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "endpoint_id": {"type": "string"},
+    "status": {"enum": ["settled", "uncertain", "blocked_by_policy", "approval_pending", "approval_denied", "user_took_over", "paused", "stopped", "device_locked", "device_offline", "device_busy", "unsupported", "failed"]},
+    "output": {"type": "object"},
+    "error_code": {"type": ["string", "null"]},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "evidence_refs": {"type": "array", "items": {"type": "string"}},
+    "correlation_id": {"type": ["string", "null"]}
+  },
+  "additionalProperties": false
+}

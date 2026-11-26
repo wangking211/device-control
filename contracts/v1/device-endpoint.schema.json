@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/device-endpoint.v1.schema.json",
+  "title": "Device Endpoint Contract",
+  "description": "Provider-neutral device execution endpoint and capability snapshot. This contract does not own device inventory, trust, policy, leases, or drivers.",
+  "type": "object",
+  "required": ["endpoint_id", "tenant_ref", "protocol_version", "status", "capabilities", "observed_at"],
+  "properties": {
+    "endpoint_id": {"type": "string", "minLength": 1},
+    "tenant_ref": {"type": "string", "minLength": 1},
+    "node_ref": {"type": ["string", "null"]},
+    "protocol_version": {"type": "string", "pattern": "^v[1-9][0-9]*$"},
+    "status": {"enum": ["online", "degraded", "offline", "revoked"]},
+    "capabilities": {"type": "array", "items": {"$ref": "#/$defs/capability"}},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "metadata": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "capability": {
+      "type": "object",
+      "required": ["id", "version", "input_schema", "output_schema", "risk_tier", "execution_locality"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "input_schema": {"type": "object"},
+        "output_schema": {"type": "object"},
+        "risk_tier": {"enum": ["read", "write", "destructive", "safety_critical"]},
+        "execution_locality": {"enum": ["cloud", "edge", "device"]},
+        "permissions": {"type": "array", "items": {"type": "string"}},
+        "supports_idempotency": {"type": "boolean", "default": false},
+        "max_timeout_ms": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    }
+  }
+}
