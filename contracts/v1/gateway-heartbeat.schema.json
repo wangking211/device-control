@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/gateway-heartbeat.v1.schema.json",
+  "title": "Device Gateway Heartbeat",
+  "description": "Gateway liveness and adapter inventory. A stale heartbeat moves the gateway offline; revocation is separate.",
+  "type": "object",
+  "required": ["status", "protocol_version"],
+  "properties": {
+    "status": {"enum": ["online", "degraded", "offline"]},
+    "protocol_version": {"const": "v1"},
+    "agent_version": {"type": "string", "maxLength": 100},
+    "adapter_inventory": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["adapter_id", "version", "capabilities"],
+        "properties": {
+          "adapter_id": {"type": "string", "minLength": 1},
+          "version": {"type": "string", "minLength": 1},
+          "capabilities": {"type": "array", "items": {"type": "string"}},
+          "platform": {"type": "object", "additionalProperties": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "health": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}

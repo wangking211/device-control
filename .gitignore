@@ -3,3 +3,9 @@ __pycache__/
 .venv/
 *.egg-info/
 .env
+
+var/
+*.sqlite3
+.mypy_cache/
+.ruff_cache/
+.cache/

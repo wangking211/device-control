@@ -1,27 +1,78 @@
-# Device Control service
+# Device Control
 
-This is the standalone source repository for `products/device-control` in ai-platform.
+Independent device-control control plane and gateway for the ai-platform
+family. MindOS keeps Task/TaskRun, scheduling and user-facing approval UX;
+this service owns device/gateway identity, endpoint inventory, leases, device
+policy enforcement, command coordination, adapter lifecycle and evidence
+metadata.
 
-## Scope
+**Current milestone:** DC-002 → DC-005 implemented in this repository.
 
-The service owns device inventory and trust, device policy and physical-device leases, sessions, action audit/evidence references, and device gateways. Consumer products retain task/run/business approval authority. Shared wire contracts are provider-neutral; hardware drivers stay behind isolated gateway adapters.
+| Area | Status | Evidence |
+| --- | --- | --- |
+| DC-002 identity, tenant, approval, lease, migration hardening | Implemented, tested | `tests/test_security.py`, `acceptance/ACCEPTANCE-MATRIX.md` |
+| DC-003 gateway protocol and lifecycle | Implemented, tested | `tests/test_gateway_protocol.py`, `gateway/tests/` |
+| DC-004 Android gateway/adapter | Implemented; hardware acceptance **BLOCKED** (no adb/emulator in this environment) | `gateway/tests/test_adb_adapter.py`, `gateway/tests/test_worker_e2e.py` |
+| DC-005 command state machine, idempotency, verification, TaskRun correlation | Implemented, tested | `tests/test_commands.py`, `gateway/tests/test_worker_e2e.py` |
+| Docker non-root volume persistence | Configured; **BLOCKED** (Docker unavailable here) | `Dockerfile`, `docker-compose.yml` |
 
-## Current milestone: D1 contract service
+Do not call this production-ready until security, migration, Docker persistence,
+real Android device and MindOS end-to-end criteria in
+`acceptance/ACCEPTANCE-MATRIX.md` pass.
 
-Implemented: liveness/readiness checks; read-only v1 contract catalog and schema retrieval; JSON Schema validation; container build. Not implemented: authenticated endpoint enrollment, device inventory persistence, command execution, lease/policy engine, event delivery, or hardware drivers. No device action endpoint is exposed in this milestone.
+## Quick start (local)
 
-See `docs/CONTRACT_COMPATIBILITY.md` for canonical schema synchronization.
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -e ".[test]"
+export MINDOS_IDENTITY_HMAC_KEY="$(python -c 'import secrets;print(secrets.token_urlsafe(48))')"
+export MINDOS_IDENTITY_ISSUER=mindos-local
+export DEVICE_CONTROL_ADMIN_TOKEN="$(python -c 'import secrets;print(secrets.token_urlsafe(32))')"
+export DEVICE_CONTROL_DB=./var/device-control.sqlite3
+uvicorn device_control.app:app --app-dir src --port 8085
+```
 
-## Endpoint enrollment (D1.1)
+- Bootstrap token: local provisioning only. Production (`DEVICE_CONTROL_ENV=production`)
+  rejects it and requires platform-issued HS256 identities.
+- Mint a local test token: `python scripts/mint_local_token.py --subject agent-1 --tenant tenant-a --permission device.endpoint.read`.
+- Enroll a gateway: `python scripts/bootstrap_gateway.py --control-url http://127.0.0.1:8085 --admin-token "$DEVICE_CONTROL_ADMIN_TOKEN" --tenant tenant-a --gateway gateway-a`.
 
-Set `DEVICE_CONTROL_ADMIN_TOKEN` to a high-entropy secret before enabling endpoint administration. `POST /v1/endpoints` requires that bearer token, binds the endpoint to a tenant, and returns a one-time endpoint credential; only its SHA-256 digest is stored. Endpoints authenticate heartbeats with that credential. `DELETE /v1/endpoints/{endpoint_id}` revokes the credential immediately. `GET /v1/endpoints?tenant_ref=...` is admin-token protected. The admin token is currently a single deployment-wide bootstrap credential; replace it with the platform service identity before multi-tenant production use. Protect the service with TLS and private network policy.
+## Gateway (separately deployable)
 
-The API accepts only endpoint enrollment, inventory readback, heartbeat, and revocation. It does not execute device actions or treat reported capabilities as authorization. Reported capabilities are untrusted observations; action execution must add per-tenant policy, pairing approval, and device-scoped leases first.
+```bash
+pip install -e ./gateway
+export DEVICE_CONTROL_URL=http://127.0.0.1:8085
+export DEVICE_GATEWAY_ID=gateway-a
+export DEVICE_GATEWAY_CREDENTIAL=<one-time credential from bootstrap>
+export DEVICE_GATEWAY_ADAPTER=fake        # or android
+export DEVICE_GATEWAY_ALLOWED_APPS=com.example.notes
+python -m device_gateway.main --once
+```
 
-## Device leases (foundation only)
+ADB path and serial come from operator configuration
+(`DEVICE_GATEWAY_ADB_PATH`, `DEVICE_GATEWAY_SERIAL`); they are never accepted
+from a command envelope. ADB never runs in this FastAPI process.
 
-The admin API can acquire one exclusive lease per online endpoint with `POST /v1/device-leases`; leases bind tenant, task/run references, holder and `read_only` or `control` mode, and expire after 1–3600 seconds. Conflicts return `409 device_busy` with the current holder/task references. Release is tenant-scoped through `DELETE /v1/device-leases/{lease_id}?tenant_ref=...`; expired leases are reclaimed on the next acquisition, and endpoint revocation releases active leases. This is a concurrency primitive, not a complete authorization policy: the deployment-wide admin token still authorizes these calls, and device actions remain unavailable until approval/policy enforcement is added.
+## Documentation
 
-## Policy evaluation (pre-execution gate)
+- `docs/ARCHITECTURE.md` — components, trust boundaries, data flow.
+- `docs/DC-002-SECURITY-AUTH.md` — principals, scopes, approvals, tenant isolation.
+- `docs/DC-003-GATEWAY-PROTOCOL.md` — lifecycle, transport, lifecycle endpoints.
+- `docs/DC-004-ANDROID-GATEWAY.md` — adapter capabilities, exclusions, support matrix.
+- `docs/DC-005-COMMAND-EXECUTION.md` — state machine, idempotency, verification, events.
+- `docs/API.md` — HTTP surface.
+- `docs/MINDOS-INTEGRATION.md` — TaskRun correlation and failure isolation.
+- `docs/OPERATIONS.md` — migrations, volumes, rotation, maintenance.
+- `docs/ADR-001-DEVICE-CONTROL-STATE.md` — new-table/endpoint/abstraction justification.
+- `acceptance/ACCEPTANCE-MATRIX.md` — PASS/FAIL/BLOCKED with commands.
 
-`POST /v1/policy/evaluate` requires the admin service credential and a live lease matching endpoint and tenant. It returns `allow`, `ask`, or `deny`; read-only leases deny non-read actions, sensitive app identifiers and password/OTP/secret targets deny, known high-impact actions return ask, and unknown mutations default to ask. This is an initial deterministic baseline. It is not an approval workflow and its result does not execute or authorize a hardware action; do not expose it as a user-scoped production policy API until the admin service identity and policy profiles are replaced with the platform authorization contract.
+## Tests
+
+```bash
+python -m pytest -q
+python -m ruff check src tests gateway/src gateway/tests scripts
+python -m mypy src/device_control gateway/src/device_gateway --ignore-missing-imports
+```
+
+57 tests pass on Python 3.12 / Windows (2026-11-26). See
+`acceptance/ACCEPTANCE-MATRIX.md` for the exact run and blocked hardware items.

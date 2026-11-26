@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/gateway-activation.v1.schema.json",
+  "title": "Device Gateway Activation Request",
+  "description": "Exchanges the one-time enrollment token for a scoped access credential. Transport mutual authentication is a deployment concern (TLS/mTLS).",
+  "type": "object",
+  "required": ["enrollment_token", "protocol_version"],
+  "properties": {
+    "enrollment_token": {"type": "string", "minLength": 32, "writeOnly": true},
+    "protocol_version": {"const": "v1"},
+    "agent_version": {"type": "string", "maxLength": 100},
+    "platform": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}

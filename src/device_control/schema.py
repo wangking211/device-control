@@ -1,0 +1,395 @@
+"""Versioned SQLite migrations.
+
+The service previously created tables lazily with ``CREATE TABLE IF NOT
+EXISTS``. That cannot upgrade an existing database, so this module applies
+ordered, recorded migrations and adopts databases created by the old code
+without losing endpoints, leases or approvals.
+
+Each migration runs inside ``BEGIN IMMEDIATE`` together with its
+``schema_migrations`` row, so a partially applied version is rolled back.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+LATEST_VERSION = 4
+
+
+@dataclass(frozen=True)
+class Migration:
+    version: int
+    name: str
+    statements: tuple[str, ...]
+
+
+ENDPOINTS = """
+CREATE TABLE IF NOT EXISTS device_endpoints (
+    endpoint_id TEXT PRIMARY KEY,
+    tenant_ref TEXT NOT NULL,
+    node_ref TEXT,
+    gateway_id TEXT,
+    credential_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('online','degraded','offline','revoked')),
+    capabilities_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    credential_expires_at TEXT,
+    credential_rotated_at TEXT,
+    last_heartbeat_at TEXT,
+    revoke_reason TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+)
+"""
+
+LEASES = """
+CREATE TABLE IF NOT EXISTS device_leases (
+    lease_id TEXT PRIMARY KEY,
+    endpoint_id TEXT NOT NULL REFERENCES device_endpoints(endpoint_id),
+    tenant_ref TEXT NOT NULL,
+    task_ref TEXT NOT NULL,
+    run_ref TEXT,
+    holder_ref TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('read_only','control')),
+    expires_at TEXT NOT NULL,
+    released_at TEXT,
+    holder_type TEXT,
+    released_reason TEXT
+)
+"""
+
+APPROVALS_NEW = """
+CREATE TABLE IF NOT EXISTS device_approvals_next (
+    approval_id TEXT PRIMARY KEY,
+    tenant_ref TEXT NOT NULL,
+    endpoint_id TEXT NOT NULL,
+    gateway_id TEXT NOT NULL DEFAULT '',
+    lease_id TEXT NOT NULL,
+    requester_ref TEXT NOT NULL,
+    requester_type TEXT NOT NULL DEFAULT 'user',
+    approver_ref TEXT,
+    approver_type TEXT,
+    action_digest TEXT NOT NULL,
+    capability_id TEXT NOT NULL DEFAULT '',
+    capability_version TEXT NOT NULL DEFAULT '',
+    intent TEXT NOT NULL DEFAULT '',
+    parameters_json TEXT NOT NULL DEFAULT '{}',
+    state_hash TEXT,
+    policy_version TEXT NOT NULL DEFAULT '',
+    risk_tier TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK(status IN ('pending','approved','denied','consumed','expired','invalidated')),
+    reason TEXT,
+    expires_at TEXT NOT NULL,
+    decided_at TEXT,
+    consumed_at TEXT,
+    consumed_by TEXT,
+    command_id TEXT,
+    created_at TEXT NOT NULL DEFAULT ''
+)
+"""
+
+GATEWAYS = """
+CREATE TABLE IF NOT EXISTS device_gateways (
+    gateway_id TEXT PRIMARY KEY,
+    tenant_ref TEXT NOT NULL,
+    display_name TEXT,
+    status TEXT NOT NULL CHECK(status IN ('enrollment_pending','trusted','online','degraded','offline','revoked')),
+    protocol_version TEXT NOT NULL,
+    adapter_inventory_json TEXT NOT NULL DEFAULT '[]',
+    platform_json TEXT NOT NULL DEFAULT '{}',
+    enrolled_at TEXT NOT NULL,
+    activated_at TEXT,
+    last_heartbeat_at TEXT,
+    last_seen_version TEXT,
+    revoked_at TEXT,
+    revoke_reason TEXT
+)
+"""
+
+GATEWAY_CREDENTIALS = """
+CREATE TABLE IF NOT EXISTS gateway_credentials (
+    credential_id TEXT PRIMARY KEY,
+    gateway_id TEXT NOT NULL REFERENCES device_gateways(gateway_id),
+    tenant_ref TEXT NOT NULL,
+    purpose TEXT NOT NULL CHECK(purpose IN ('enrollment','access')),
+    credential_hash TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,
+    rotated_from TEXT
+)
+"""
+
+COMMANDS = """
+CREATE TABLE IF NOT EXISTS device_commands (
+    command_id TEXT PRIMARY KEY,
+    tenant_ref TEXT NOT NULL,
+    endpoint_id TEXT NOT NULL,
+    gateway_id TEXT NOT NULL,
+    task_ref TEXT,
+    run_ref TEXT,
+    correlation_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    capability_version TEXT NOT NULL,
+    parameters_json TEXT NOT NULL,
+    parameters_digest TEXT NOT NULL,
+    intent TEXT NOT NULL,
+    risk_tier TEXT NOT NULL DEFAULT 'write',
+    deadline TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    lease_id TEXT NOT NULL,
+    approval_id TEXT,
+    policy_version TEXT NOT NULL,
+    policy_decision TEXT NOT NULL,
+    state_hash TEXT,
+    expected_state_json TEXT,
+    status TEXT NOT NULL CHECK(status IN (
+        'created','validated','authorized','queued','dispatched','received',
+        'accepted','executing','verifying','succeeded','rejected','failed',
+        'timed_out','cancelled','uncertain','expired')),
+    status_reason TEXT,
+    submitted_by TEXT NOT NULL,
+    submitter_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    dispatched_at TEXT,
+    completed_at TEXT,
+    result_json TEXT,
+    verification_json TEXT,
+    evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    protocol_version TEXT NOT NULL DEFAULT 'v1'
+)
+"""
+
+TRANSITIONS = """
+CREATE TABLE IF NOT EXISTS command_transitions (
+    transition_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    command_id TEXT NOT NULL REFERENCES device_commands(command_id),
+    tenant_ref TEXT NOT NULL,
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    reason TEXT,
+    actor_ref TEXT,
+    actor_type TEXT,
+    occurred_at TEXT NOT NULL
+)
+"""
+
+OUTBOX = """
+CREATE TABLE IF NOT EXISTS command_events (
+    event_id TEXT PRIMARY KEY,
+    tenant_ref TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_version TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    source_ref TEXT,
+    correlation_id TEXT,
+    task_ref TEXT,
+    run_ref TEXT,
+    aggregate_type TEXT NOT NULL,
+    aggregate_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    published_at TEXT,
+    delivery_attempts INTEGER NOT NULL DEFAULT 0
+)
+"""
+
+AUDIT = """
+CREATE TABLE IF NOT EXISTS audit_records (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_ref TEXT,
+    actor_ref TEXT,
+    actor_type TEXT,
+    action TEXT NOT NULL,
+    resource_type TEXT,
+    resource_id TEXT,
+    outcome TEXT,
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    correlation_id TEXT,
+    occurred_at TEXT NOT NULL
+)
+"""
+
+MIGRATIONS: tuple[Migration, ...] = (
+    Migration(
+        1,
+        "baseline_reconcile_endpoints_leases_approvals",
+        (
+            ENDPOINTS,
+            LEASES,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_device_active_lease "
+            "ON device_leases(endpoint_id) WHERE released_at IS NULL",
+        ),
+    ),
+    Migration(
+        2,
+        "gateway_identity_and_credentials",
+        (
+            GATEWAYS,
+            GATEWAY_CREDENTIALS,
+            "CREATE INDEX IF NOT EXISTS ix_gateway_credentials_gateway "
+            "ON gateway_credentials(gateway_id, purpose, revoked_at)",
+            "CREATE INDEX IF NOT EXISTS ix_gateways_tenant ON device_gateways(tenant_ref, status)",
+        ),
+    ),
+    Migration(
+        3,
+        "command_state_machine_outbox_audit",
+        (
+            COMMANDS,
+            TRANSITIONS,
+            OUTBOX,
+            AUDIT,
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_command_idempotency "
+            "ON device_commands(tenant_ref, endpoint_id, capability_id, idempotency_key)",
+            "CREATE INDEX IF NOT EXISTS ix_commands_gateway_queue "
+            "ON device_commands(gateway_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_commands_tenant_endpoint "
+            "ON device_commands(tenant_ref, endpoint_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_events_tenant_time "
+            "ON command_events(tenant_ref, occurred_at)",
+            "CREATE INDEX IF NOT EXISTS ix_audit_tenant_time "
+            "ON audit_records(tenant_ref, occurred_at)",
+        ),
+    ),
+    Migration(
+        4,
+        "command_evidence_and_binding_columns",
+        (
+            "CREATE INDEX IF NOT EXISTS ix_approvals_pending "
+            "ON device_approvals(tenant_ref, endpoint_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_commands_status_deadline "
+            "ON device_commands(status, deadline)",
+        ),
+    ),
+)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def apply(connection: sqlite3.Connection) -> list[int]:
+    """Apply all pending migrations and return the versions applied."""
+
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA busy_timeout=5000")
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+    )
+    applied = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+    newly_applied: list[int] = []
+    for migration in MIGRATIONS:
+        if migration.version in applied:
+            continue
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            already = connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=?", (migration.version,)
+            ).fetchone()
+            if already is not None:
+                connection.execute("COMMIT")
+                continue
+            for statement in migration.statements:
+                connection.execute(statement)
+            if migration.version == 1:
+                _adopt_legacy_endpoints(connection)
+                _rebuild_approvals(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+                (migration.version, migration.name, now_iso()),
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        newly_applied.append(migration.version)
+    _ensure_indexes(connection)
+    return newly_applied
+
+
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+
+
+def _adopt_legacy_endpoints(connection: sqlite3.Connection) -> None:
+    existing = _columns(connection, "device_endpoints")
+    additions = {
+        "gateway_id": "TEXT",
+        "credential_expires_at": "TEXT",
+        "credential_rotated_at": "TEXT",
+        "last_heartbeat_at": "TEXT",
+        "revoke_reason": "TEXT",
+        "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+    }
+    for column, definition in additions.items():
+        if column not in existing:
+            connection.execute(f"ALTER TABLE device_endpoints ADD COLUMN {column} {definition}")
+
+    lease_columns = _columns(connection, "device_leases")
+    for column, definition in {"holder_type": "TEXT", "released_reason": "TEXT"}.items():
+        if column not in lease_columns:
+            connection.execute(f"ALTER TABLE device_leases ADD COLUMN {column} {definition}")
+
+
+def _rebuild_approvals(connection: sqlite3.Connection) -> None:
+    existing = _columns(connection, "device_approvals")
+    if not existing:
+        connection.execute(APPROVALS_NEW)
+        connection.execute("ALTER TABLE device_approvals_next RENAME TO device_approvals")
+        return
+    if {"gateway_id", "parameters_json", "policy_version"}.issubset(existing):
+        return
+
+    connection.execute("DROP TABLE IF EXISTS device_approvals_next")
+    connection.execute(APPROVALS_NEW)
+    legacy_rows = connection.execute("SELECT * FROM device_approvals").fetchall()
+    columns = [row[1] for row in connection.execute("PRAGMA table_info(device_approvals)")]
+    index = {name: position for position, name in enumerate(columns)}
+    for row in legacy_rows:
+        def value(name: str, default=None, _row=row):
+            position = index.get(name)
+            return _row[position] if position is not None else default
+
+        status = value("status", "pending")
+        if status not in {"pending", "approved", "denied", "consumed", "expired"}:
+            status = "invalidated"
+        connection.execute(
+            "INSERT INTO device_approvals_next ("
+            "approval_id, tenant_ref, endpoint_id, gateway_id, lease_id, requester_ref,"
+            " requester_type, approver_ref, approver_type, action_digest, capability_id,"
+            " capability_version, intent, parameters_json, state_hash, policy_version,"
+            " risk_tier, status, reason, expires_at, decided_at, consumed_at, consumed_by,"
+            " command_id, created_at)"
+            " VALUES (?, ?, ?, '', ?, ?, 'agent', ?, NULL, ?, '', '', '', '{}', NULL, '',"
+            " '', ?, NULL, ?, ?, NULL, NULL, NULL, '')",
+            (
+                value("approval_id"),
+                value("tenant_ref"),
+                value("endpoint_id"),
+                value("lease_id"),
+                value("requester_ref"),
+                value("approver_ref"),
+                value("action_digest"),
+                status,
+                value("expires_at"),
+                value("decided_at"),
+            ),
+        )
+    connection.execute("DROP TABLE device_approvals")
+    connection.execute("ALTER TABLE device_approvals_next RENAME TO device_approvals")
+
+
+def _ensure_indexes(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_endpoints_tenant ON device_endpoints(tenant_ref, status)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_leases_tenant ON device_leases(tenant_ref, endpoint_id)"
+    )
+    connection.commit()

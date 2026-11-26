@@ -1,0 +1,6 @@
+[bandit]
+exclude = tests,gateway/tests,scripts
+# B404/B603/B607: subprocess is deliberate and constrained to argument arrays
+# in the gateway adapter (DC-004). B110: observers in the gateway must not break
+# the control loop; failures are reported as events/results instead.
+skips = B101,B110,B404,B603,B607

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/gateway-enrollment.v1.schema.json",
+  "title": "Device Gateway Enrollment Request",
+  "description": "Control-plane registration of a separately deployable gateway. The returned enrollment token is one-time and short lived.",
+  "type": "object",
+  "required": ["gateway_id", "protocol_version", "adapter_inventory"],
+  "properties": {
+    "gateway_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "tenant_ref": {"type": ["string", "null"], "maxLength": 200},
+    "display_name": {"type": ["string", "null"], "maxLength": 200},
+    "protocol_version": {"const": "v1"},
+    "adapter_inventory": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["adapter_id", "version", "capabilities"],
+        "properties": {
+          "adapter_id": {"type": "string", "minLength": 1, "maxLength": 200},
+          "version": {"type": "string", "minLength": 1, "maxLength": 100},
+          "capabilities": {"type": "array", "items": {"type": "string"}},
+          "platform": {"type": "object", "additionalProperties": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "metadata": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}

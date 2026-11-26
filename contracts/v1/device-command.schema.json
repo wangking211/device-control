@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/device-command.v1.schema.json",
+  "title": "Device Command Submission",
+  "description": "Caller-supplied command intent. Identity, tenant, gateway, policy version and approval are derived or verified by the service, never trusted from this body.",
+  "type": "object",
+  "required": [
+    "endpoint_id", "capability_id", "capability_version", "input", "intent",
+    "deadline", "idempotency_key", "lease_id"
+  ],
+  "properties": {
+    "endpoint_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "capability_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "capability_version": {"type": "string", "minLength": 1, "maxLength": 100},
+    "input": {"type": "object"},
+    "intent": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "deadline": {"type": "string", "format": "date-time"},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200},
+    "lease_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "approval_id": {"type": ["string", "null"], "maxLength": 200},
+    "state_hash": {"type": ["string", "null"], "maxLength": 200},
+    "expected_state": {"type": ["object", "null"]},
+    "task_ref": {"type": ["string", "null"], "maxLength": 200},
+    "run_ref": {"type": ["string", "null"], "maxLength": 200},
+    "correlation_id": {"type": ["string", "null"], "maxLength": 200}
+  },
+  "additionalProperties": false
+}

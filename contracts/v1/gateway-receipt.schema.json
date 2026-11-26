@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/gateway-receipt.v1.schema.json",
+  "title": "Device Gateway Enrollment or Activation Receipt",
+  "description": "Credentials are returned exactly once and are never persisted or logged in plaintext by the service.",
+  "type": "object",
+  "required": ["gateway_id", "status"],
+  "properties": {
+    "gateway_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["enrollment_pending", "trusted"]},
+    "tenant_ref": {"type": "string", "minLength": 1},
+    "enrollment_token": {"type": "string", "minLength": 32, "writeOnly": true},
+    "enrollment_expires_at": {"type": "string", "format": "date-time"},
+    "credential": {"type": "string", "minLength": 32, "writeOnly": true},
+    "credential_id": {"type": "string", "minLength": 1},
+    "expires_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}

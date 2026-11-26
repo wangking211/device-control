@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/device-event.v1.schema.json",
+  "title": "Device Control Event Envelope",
+  "description": "Transactional-outbox event. Delivery is at-least-once; consumers deduplicate by event_id. Ordering scope is one tenant.",
+  "type": "object",
+  "required": [
+    "event_id", "event_type", "event_version", "occurred_at", "tenant_ref",
+    "source_ref", "aggregate_type", "aggregate_id", "payload"
+  ],
+  "properties": {
+    "event_id": {"type": "string", "minLength": 1},
+    "event_type": {"type": "string", "minLength": 1},
+    "event_version": {"const": "1"},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "tenant_ref": {"type": "string", "minLength": 1},
+    "source_ref": {"type": ["string", "null"]},
+    "correlation_id": {"type": ["string", "null"]},
+    "task_ref": {"type": ["string", "null"]},
+    "run_ref": {"type": ["string", "null"]},
+    "aggregate_type": {"type": "string", "minLength": 1},
+    "aggregate_id": {"type": "string", "minLength": 1},
+    "payload": {"type": "object"},
+    "published_at": {"type": ["string", "null"], "format": "date-time"}
+  },
+  "additionalProperties": false
+}

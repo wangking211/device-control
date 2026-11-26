@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/gateway-command.v1.schema.json",
+  "title": "Gateway Command Envelope",
+  "description": "Bounded command delivered to a gateway. Authorization fields are control-plane decisions; the gateway revalidates them before execution.",
+  "type": "object",
+  "required": [
+    "command_id", "tenant_ref", "endpoint_id", "gateway_id", "capability_id",
+    "capability_version", "parameters", "intent", "deadline", "idempotency_key",
+    "lease_id", "policy_version", "risk_tier", "protocol_version"
+  ],
+  "properties": {
+    "command_id": {"type": "string", "minLength": 1},
+    "tenant_ref": {"type": "string", "minLength": 1},
+    "endpoint_id": {"type": "string", "minLength": 1},
+    "gateway_id": {"type": "string", "minLength": 1},
+    "task_ref": {"type": ["string", "null"]},
+    "run_ref": {"type": ["string", "null"]},
+    "correlation_id": {"type": ["string", "null"]},
+    "capability_id": {"type": "string", "minLength": 1},
+    "capability_version": {"type": "string", "minLength": 1},
+    "parameters": {"type": "object"},
+    "intent": {"type": "string", "minLength": 1},
+    "deadline": {"type": "string", "format": "date-time"},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "lease_id": {"type": "string", "minLength": 1},
+    "approval_id": {"type": ["string", "null"]},
+    "policy_version": {"type": "string", "minLength": 1},
+    "policy_decision": {"enum": ["allow", "ask"]},
+    "risk_tier": {"enum": ["read", "write", "destructive", "safety_critical"]},
+    "state_hash": {"type": ["string", "null"]},
+    "expected_state": {"type": ["object", "null"]},
+    "attempt": {"type": "integer", "minimum": 1},
+    "protocol_version": {"const": "v1"}
+  },
+  "additionalProperties": false
+}

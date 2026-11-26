@@ -10,7 +10,8 @@
     "node_ref": {"type": ["string", "null"], "maxLength": 200},
     "protocol_version": {"const": "v1"},
     "capabilities": {"type": "array", "items": {"$ref": "device-endpoint.schema.json#/$defs/capability"}},
-    "metadata": {"type": "object", "additionalProperties": true}
+    "metadata": {"type": "object", "additionalProperties": true},
+    "gateway_id": {"type": ["string", "null"], "maxLength": 200}
   },
   "additionalProperties": false
 }

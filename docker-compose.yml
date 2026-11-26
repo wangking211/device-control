@@ -1,0 +1,36 @@
+services:
+  device-control:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DEVICE_CONTROL_ENV: ${DEVICE_CONTROL_ENV:-local}
+      DEVICE_CONTROL_DB: /data/device-control.sqlite3
+      DEVICE_CONTROL_ADMIN_TOKEN: ${DEVICE_CONTROL_ADMIN_TOKEN:-}
+      MINDOS_IDENTITY_HMAC_KEY: ${MINDOS_IDENTITY_HMAC_KEY:-}
+      MINDOS_IDENTITY_ISSUER: ${MINDOS_IDENTITY_ISSUER:-}
+    ports:
+      - "8085:8085"
+    volumes:
+      - device-control-data:/data
+
+  device-gateway:
+    profiles: ["gateway"]
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    depends_on:
+      - device-control
+    environment:
+      DEVICE_CONTROL_URL: http://device-control:8085
+      DEVICE_GATEWAY_ID: ${DEVICE_GATEWAY_ID:-dev-gateway}
+      DEVICE_GATEWAY_CREDENTIAL: ${DEVICE_GATEWAY_CREDENTIAL:?run scripts/bootstrap_gateway.py first}
+      DEVICE_GATEWAY_ADAPTER: ${DEVICE_GATEWAY_ADAPTER:-fake}
+      DEVICE_GATEWAY_DB: /data/gateway-ledger.sqlite3
+      DEVICE_GATEWAY_ALLOWED_APPS: ${DEVICE_GATEWAY_ALLOWED_APPS:-com.example.notes}
+    volumes:
+      - device-gateway-data:/data
+
+volumes:
+  device-control-data:
+  device-gateway-data:

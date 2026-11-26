@@ -16,6 +16,9 @@ consumes:
 exports:
   capabilities:
     - governed-device-control
+    - device-gateway-protocol
+    - device-command-execution
+    - device-evidence-metadata
 agents: []
 skills: []
 interfaces:
@@ -24,6 +27,7 @@ interfaces:
 deployment:
   profiles:
     - standalone
+    - gateway
 governance:
   security: tenant-scoped
   audit: true

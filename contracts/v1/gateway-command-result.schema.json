@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/gateway-command-result.v1.schema.json",
+  "title": "Gateway Command Result",
+  "description": "Execution-side outcome. Transport acceptance is not success; succeeded requires verification evidence or a documented adapter guarantee.",
+  "type": "object",
+  "required": ["status"],
+  "properties": {
+    "status": {
+      "enum": [
+        "received", "accepted", "executing", "succeeded", "failed", "rejected",
+        "timed_out", "cancelled", "uncertain"
+      ]
+    },
+    "reason": {"type": ["string", "null"], "maxLength": 1000},
+    "error_class": {
+      "enum": [
+        null, "validation", "policy", "adapter", "transport", "timeout",
+        "unavailable", "state_changed", "user_takeover", "unknown"
+      ]
+    },
+    "retryable": {"type": "boolean"},
+    "output": {"type": ["object", "null"]},
+    "verification": {
+      "type": ["object", "null"],
+      "properties": {
+        "method": {
+          "enum": [
+            "adapter_ack", "read_after_write", "ui_state", "screenshot_predicate",
+            "sensor_observation", "manual_confirmation"
+          ]
+        },
+        "verified": {"type": "boolean"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "observed_state": {"type": ["object", "null"]},
+        "quality": {"enum": ["high", "medium", "low"]},
+        "adapter_guarantee": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "evidence_refs": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+    "adapter_version": {"type": ["string", "null"]},
+    "occurred_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}
