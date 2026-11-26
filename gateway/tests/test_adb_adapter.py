@@ -4,6 +4,18 @@ import pytest
 from device_gateway.adapters.android_adb import AdbSettings, AndroidAdbAdapter
 from device_gateway.adapters.base import AdapterError, AdapterTimeout
 
+UI_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
+<hierarchy rotation="0">
+  <node class="android.widget.FrameLayout" bounds="[0,0][1080,1920]" text="">
+    <node class="android.widget.EditText" resource-id="field-search" bounds="[20,100][700,180]"
+          text="hello" clickable="true" password="false" visible-to-user="true" />
+    <node class="android.widget.EditText" resource-id="field-password" bounds="[20,220][700,300]"
+          text="" clickable="true" password="true" visible-to-user="true" />
+    <node class="android.widget.Button" resource-id="button-continue" bounds="[20,340][700,420]"
+          text="Continue" clickable="true" password="false" visible-to-user="true" />
+  </node>
+</hierarchy>"""
+
 
 class FakeCompleted:
     def __init__(self, stdout=b"", stderr=b"", returncode=0):
@@ -24,14 +36,31 @@ def adapter(**overrides):
     return AndroidAdbAdapter(settings)
 
 
-def test_adb_invocation_uses_argument_arrays_and_no_shell(monkeypatch):
-    calls = []
-
+def fake_run_factory(calls):
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
+        joined = " ".join(command)
+        if "uiautomator dump" in joined:
+            return FakeCompleted(stdout=b"UI hierchary dumped to: /sdcard/window_dump.xml")
+        if "window_dump.xml" in joined:
+            return FakeCompleted(stdout=UI_XML)
+        if "dumpsys window" in joined:
+            return FakeCompleted(
+                stdout=b"  mCurrentFocus=Window{abc u0 com.example.notes/com.example.NotesActivity}"
+            )
+        if "dumpsys power" in joined:
+            return FakeCompleted(stdout=b"  mWakefulness=Awake")
+        if "getprop" in joined:
+            return FakeCompleted(stdout=b"test-value")
+        if "screencap" in joined:
+            return FakeCompleted(stdout=b"\x89PNG\r\n\x1a\n" + b"x" * 100)
         return FakeCompleted(stdout=b"device\n")
+    return fake_run
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+
+def test_adb_invocation_uses_argument_arrays_and_no_shell(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", fake_run_factory(calls))
     result = adapter().health()
     assert result["status"] == "ok"
     command, kwargs = calls[0]
@@ -41,52 +70,57 @@ def test_adb_invocation_uses_argument_arrays_and_no_shell(monkeypatch):
     assert kwargs["timeout"] == 5.0
 
 
-def test_adb_parses_foreground_app_and_hashes_screenshots(monkeypatch):
-    raw_png = b"\x89PNG\r\nfake-frame"
-
-    def fake_run(command, **kwargs):
-        if "dumpsys" in command:
-            return FakeCompleted(stdout=b"  mCurrentFocus=Window{abc u0 com.example.notes/com.example.NotesActivity}")
-        return FakeCompleted(stdout=raw_png)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+def test_adb_parses_ui_nodes_and_hashes_screenshots(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", fake_run_factory(calls))
     instance = adapter()
-    assert instance.observe_state()["foreground_app"] == "com.example.notes"
-    screenshot = instance.execute("observe.screenshot", {})
+    state = instance.observe_state()
+    assert state["foreground_app"] == "com.example.notes"
+    assert state["source"] == "uiautomator"
+    assert state["quality"] == "high"
+    assert state["state_version"].startswith("v1:")
+    assert state["device_fingerprint"]
+    search = next(node for node in state["nodes"] if node["resource_id"] == "field-search")
+    assert search["editable"] is True
+    assert search["text_length"] == 5
+    assert "hello" not in str(state)  # text is never exposed
+
+    screenshot = instance.execute("device.screenshot", {})
     assert screenshot.status == "succeeded"
     assert screenshot.output["redacted"] is True
-    assert screenshot.output["bytes"] == len(raw_png)
+    assert screenshot.output["mime_type"] == "image/png"
     assert screenshot.output["screenshot_sha256"]
     assert screenshot.evidence_refs == [f"sha256:{screenshot.output['screenshot_sha256']}"]
 
 
 def test_adb_refuses_non_allowlisted_apps_and_unsafe_text(monkeypatch):
     calls = []
-
-    def fake_run(command, **kwargs):
-        calls.append(command)
-        return FakeCompleted()
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "run", fake_run_factory(calls))
     instance = adapter()
     rejected = instance.execute("app.launch", {"app_id": "com.evil.app"})
     assert rejected.status == "rejected"
     assert rejected.reason == "app_not_allowlisted"
-    assert calls == []
+    assert not any("monkey" in " ".join(call[0]) for call in calls)
 
     with pytest.raises(AdapterError):
-        instance.execute("ui.type_text", {"target_ref": "field", "text": "a; rm -rf /"})
-    assert calls == []
+        instance.execute("ui.type_text", {"target_ref": "field-search", "text": "a; rm -rf /"})
 
 
-def test_adb_rejects_secret_fields_without_calling_device(monkeypatch):
+def test_adb_rejects_password_control_and_does_not_type(monkeypatch):
     calls = []
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append(a) or FakeCompleted())
-    result = adapter().execute("ui.type_text", {"target_ref": "pin", "text": "1234",
-                                                "target_type": "otp"})
+    monkeypatch.setattr(subprocess, "run", fake_run_factory(calls))
+    result = adapter().execute("ui.type_text", {"target_ref": "field-password", "text": "1234"})
     assert result.status == "rejected"
-    assert result.reason == "secret_field_blocked"
-    assert calls == []
+    assert result.reason == "sensitive_control_blocked"
+    assert not any("input text" in " ".join(call[0]) for call in calls)
+
+
+def test_adb_unknown_target_fails_closed(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", fake_run_factory(calls))
+    result = adapter().execute("ui.type_text", {"target_ref": "missing", "text": "hello"})
+    assert result.status == "rejected"
+    assert result.reason == "target_unverified"
 
 
 def test_adb_timeout_is_uncertain(monkeypatch):
@@ -100,20 +134,26 @@ def test_adb_timeout_is_uncertain(monkeypatch):
 
 def test_invalid_bounds_and_serial_are_rejected():
     with pytest.raises(ValueError):
-        AdbSettings(adb_path="adb", serial="bad serial; rm", allowed_apps=frozenset())
-        AndroidAdbAdapter(AdbSettings(adb_path="adb", serial="bad serial; rm", allowed_apps=frozenset()))
+        AndroidAdbAdapter(AdbSettings(adb_path="adb", serial="bad serial; rm",
+                                      allowed_apps=frozenset()))
     instance = adapter()
     with pytest.raises(AdapterError):
         instance._center([10, 10, 5, 5])
 
 
-def test_discovery_is_bounded_to_operator_configuration(monkeypatch):
+def test_discovery_reports_unauthorized_and_offline(monkeypatch):
     from device_gateway.adapters import android_adb
 
     def fake_run(command, **kwargs):
-        return FakeCompleted(stdout=b"List of devices attached\nemulator-5554\tdevice\n")
+        return FakeCompleted(stdout=(
+            b"List of devices attached\n"
+            b"emulator-5554\tdevice\n"
+            b"emulator-5556\tunauthorized\n"
+            b"emulator-5558\toffline\n"
+        ))
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(android_adb, "shutil", type("S", (), {"which": staticmethod(lambda _: True)}))
     devices = android_adb.discover_devices("adb")
-    assert devices == [{"serial": "emulator-5554", "state": "device", "description": ""}]
+    assert [item["state"] for item in devices] == ["device", "unauthorized", "offline"]
+    assert devices[1]["authorized"] is False

@@ -55,7 +55,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install bandit pip-audit
           pip install -e ".[test]" -e ./gateway
-      - name: Bandit (subprocess usage reviewed in DC-004)
-        run: bandit -c .bandit -r src gateway/src
-      - name: Dependency audit
-        run: pip-audit
+      - name: Security scanners
+        run: |
+          bandit -c .bandit -r src gateway/src
+          pip-audit -r requirements/audit.txt
+      - name: OpenAPI drift
+        run: |
+          python scripts/export_openapi.py
+          git diff --exit-code contracts/openapi-v1.json

@@ -47,6 +47,7 @@ SCOPE_GATEWAY_READ = "device.gateway.read"
 SCOPE_GATEWAY_WRITE = "device.gateway.write"
 SCOPE_EVENT_READ = "device.event.read"
 SCOPE_AUDIT_READ = "device.audit.read"
+SCOPE_EVIDENCE_DELETE = "device.evidence.delete"
 
 ALL_SCOPES = frozenset(
     {
@@ -64,6 +65,7 @@ ALL_SCOPES = frozenset(
         SCOPE_GATEWAY_WRITE,
         SCOPE_EVENT_READ,
         SCOPE_AUDIT_READ,
+        SCOPE_EVIDENCE_DELETE,
     }
 )
 

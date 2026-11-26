@@ -6,19 +6,23 @@ this service owns device/gateway identity, endpoint inventory, leases, device
 policy enforcement, command coordination, adapter lifecycle and evidence
 metadata.
 
-**Current milestone:** DC-002 → DC-005 implemented in this repository.
+**Current milestone:** DC-002 → DC-009 implemented in this repository.
 
 | Area | Status | Evidence |
 | --- | --- | --- |
 | DC-002 identity, tenant, approval, lease, migration hardening | Implemented, tested | `tests/test_security.py`, `acceptance/ACCEPTANCE-MATRIX.md` |
 | DC-003 gateway protocol and lifecycle | Implemented, tested | `tests/test_gateway_protocol.py`, `gateway/tests/` |
-| DC-004 Android gateway/adapter | Implemented; hardware acceptance **BLOCKED** (no adb/emulator in this environment) | `gateway/tests/test_adb_adapter.py`, `gateway/tests/test_worker_e2e.py` |
-| DC-005 command state machine, idempotency, verification, TaskRun correlation | Implemented, tested | `tests/test_commands.py`, `gateway/tests/test_worker_e2e.py` |
-| Docker non-root volume persistence | Configured; **BLOCKED** (Docker unavailable here) | `Dockerfile`, `docker-compose.yml` |
+| DC-004 Android gateway/adapter | Implemented; hardware acceptance **BLOCKED** | `gateway/tests/test_adb_adapter.py`, `gateway/tests/test_worker_e2e.py` |
+| DC-005 command state machine, idempotency, verification | Implemented, tested | `tests/test_commands.py` |
+| DC-006 manifest authority, device binding, approval v2, hard timeout | Implemented, tested | `tests/test_gateway_protocol.py`, `gateway/tests/test_preflight.py`, `gateway/tests/test_isolation.py` |
+| DC-007 Accessibility state, Evidence service, diagnostics | Implemented; real device/durable object store **BLOCKED** | `tests/test_evidence.py`, `docs/EVIDENCE_STORE.md` |
+| DC-008 OpenAPI, MindOS provider and contract mapping | Implemented; live MindOS E2E **BLOCKED** | `contracts/openapi-v1.json`, `examples/mindos_provider.py`, `tests/test_mindos_contract.py` |
+| DC-009 production guardrails, backup/upgrade/preflight, admin/alerts | Implemented; Docker/TLS/mTLS **BLOCKED** | `scripts/`, `docs/PRODUCTION_READINESS.md` |
 
 Do not call this production-ready until security, migration, Docker persistence,
 real Android device and MindOS end-to-end criteria in
-`acceptance/ACCEPTANCE-MATRIX.md` pass.
+`acceptance/ACCEPTANCE-MATRIX.md` pass. The overall decision is **NO-GO** while
+hardware/Docker/MindOS rows are BLOCKED.
 
 ## Quick start (local)
 
@@ -64,6 +68,13 @@ from a command envelope. ADB never runs in this FastAPI process.
 - `docs/MINDOS-INTEGRATION.md` — TaskRun correlation and failure isolation.
 - `docs/OPERATIONS.md` — migrations, volumes, rotation, maintenance.
 - `docs/ADR-001-DEVICE-CONTROL-STATE.md` — new-table/endpoint/abstraction justification.
+- `docs/ADR-002-DC006-009-MANIFEST-EVIDENCE.md` — manifest authority, device binding, evidence.
+- `docs/security/` — execution threat model and approval/replay analysis.
+- `docs/android/` — UI state/verification and real-device runbook.
+- `docs/EVIDENCE_STORE.md`, `docs/PRODUCTION_READINESS.md` — evidence and operations.
+- `docs/contracts/MINDOS_DEVICE_INTENT_MAPPING.md` — MindOS field/status/error mapping.
+- `docs/BASELINE_AUDIT.md` — DC-006…DC-009 baseline audit and blockers.
+- `acceptance/GO_NO_GO.md` — current NO-GO decision and remaining gates.
 - `acceptance/ACCEPTANCE-MATRIX.md` — PASS/FAIL/BLOCKED with commands.
 
 ## Tests
@@ -74,5 +85,5 @@ python -m ruff check src tests gateway/src gateway/tests scripts
 python -m mypy src/device_control gateway/src/device_gateway --ignore-missing-imports
 ```
 
-57 tests pass on Python 3.12 / Windows (2026-11-26). See
+87 tests pass on Python 3.12 / Windows (2026-11-26). See
 `acceptance/ACCEPTANCE-MATRIX.md` for the exact run and blocked hardware items.

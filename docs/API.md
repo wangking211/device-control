@@ -38,11 +38,14 @@ Errors use `{"code": "...", "detail": ...}` with the semantics in
 | GET | `/v1/gateways/{id}` | `device.gateway.read` |
 | POST | `/v1/gateways/{id}/activate` | enrollment token |
 | POST | `/v1/gateways/{id}/heartbeat` | gateway credential |
+| PUT/GET | `/v1/gateways/{id}/manifest` | `device.gateway.write` / read |
+| GET | `/v1/gateways/{id}/diagnostics` | `device.gateway.read` |
 | POST | `/v1/gateways/{id}/credentials/rotate` | `device.gateway.write` |
 | DELETE | `/v1/gateways/{id}` | `device.gateway.write` |
 | GET | `/v1/gateways/{id}/commands?limit=` | gateway credential |
 | POST | `/v1/gateways/{id}/commands/{cid}/progress` | gateway credential |
 | POST | `/v1/gateways/{id}/commands/{cid}/result` | gateway credential |
+| POST | `/v1/gateways/{id}/commands/{cid}/evidence` | gateway credential + raw bytes |
 
 ## Leases, policy, approvals
 
@@ -67,9 +70,14 @@ from verified claims; body values cannot override them.
 | GET | `/v1/commands/{id}` (`?include=transitions`) | `device.command.read` |
 | GET | `/v1/commands/{id}/evidence` | `device.command.read` |
 | POST | `/v1/commands/{id}/cancel` | `device.command.cancel` |
+| GET | `/v1/evidence/{id}` | `device.command.read` |
+| GET | `/v1/evidence/{id}/content` | `device.command.read` |
+| DELETE | `/v1/evidence/{id}` | `device.evidence.delete` |
 | GET | `/v1/events` | `device.event.read` |
 | POST | `/v1/events/ack` | `device.event.read` |
 | GET | `/v1/audit` | `device.audit.read` |
+| GET | `/v1/alerts` | `device.gateway.read` |
+| GET | `/v1/metrics` | `device.audit.read` + admin |
 | POST | `/v1/maintenance` | `device.audit.read` + admin |
 
 ## Examples

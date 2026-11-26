@@ -57,6 +57,15 @@ def identity_audience() -> str | None:
     return value or None
 
 
+def manifest_hmac_key() -> str:
+    return os.environ.get("DEVICE_CONTROL_MANIFEST_HMAC_KEY", "")
+
+
+def require_https() -> bool:
+    value = (os.environ.get("DEVICE_CONTROL_REQUIRE_HTTPS") or "").strip().lower()
+    return value in {"1", "true", "yes"} or is_production()
+
+
 def database_path() -> Path:
     configured = os.environ.get("DEVICE_CONTROL_DB")
     if configured:
@@ -103,6 +112,21 @@ def stale_after_seconds() -> int:
 
 def event_retention_seconds() -> int:
     return _bounded_int("DEVICE_CONTROL_EVENT_RETENTION_SECONDS", 7 * 86400, 3600, 90 * 86400)
+
+
+def evidence_dir() -> Path:
+    configured = os.environ.get("DEVICE_CONTROL_EVIDENCE_DIR")
+    if configured:
+        return Path(configured)
+    return Path("/data/evidence") if is_production() else Path("./var/evidence")
+
+
+def evidence_max_bytes() -> int:
+    return _bounded_int("DEVICE_CONTROL_EVIDENCE_MAX_BYTES", 8 * 1024 * 1024, 1024, 32 * 1024 * 1024)
+
+
+def evidence_default_retention_seconds() -> int:
+    return _bounded_int("DEVICE_CONTROL_EVIDENCE_RETENTION_SECONDS", 7 * 86400, 3600, 90 * 86400)
 
 
 @dataclass(frozen=True)

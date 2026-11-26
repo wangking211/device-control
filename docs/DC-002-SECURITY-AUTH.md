@@ -47,8 +47,9 @@ gateways, approvals, events and audit.
 An approval digest binds:
 
 ```
-tenant, endpoint, gateway, capability id + version, canonical parameters,
-intent, requester, lease, policy version, observed state hash
+tenant, endpoint, device id + fingerprint, gateway, capability id + version,
+manifest operation, canonical parameters, intent, requester, lease, policy
+version, manifest digest, state hash + version, one-time nonce
 ```
 
 `POST /v1/approvals/{id}/decision` ignores `approver_ref` from the body; the

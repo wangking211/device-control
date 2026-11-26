@@ -44,6 +44,7 @@ GATEWAY_PROGRESS_STATUSES = ("received", "accepted", "executing")
 
 RESULT_STATUSES = (
     "succeeded",
+    "executed_unverified",
     "failed",
     "rejected",
     "timed_out",

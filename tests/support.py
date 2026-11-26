@@ -1,4 +1,4 @@
-"""Shared test helpers: identity tokens, gateway/endpoint fixtures."""
+"""Shared test helpers: identity tokens, manifest, gateway/endpoint fixtures."""
 
 from __future__ import annotations
 
@@ -10,8 +10,14 @@ import time
 import uuid
 from typing import Any
 
+from device_gateway import manifest as gateway_manifest
+
 IDENTITY_KEY = "device-control-test-identity-key-0123456789abcdef"
 ISSUER = "mindos-test"
+MANIFEST = gateway_manifest.default_document()
+MANIFEST_DIGEST = gateway_manifest.digest(MANIFEST)
+MANIFEST_VERSION = str(MANIFEST["manifest_version"])
+DEVICE_FINGERPRINT = "test-device-fingerprint"
 
 
 def _b64(raw: bytes) -> str:
@@ -65,6 +71,9 @@ def configure(monkeypatch, tmp_path, *, production: bool = False,
     monkeypatch.setenv("MINDOS_IDENTITY_HMAC_KEY", IDENTITY_KEY)
     monkeypatch.setenv("MINDOS_IDENTITY_ISSUER", ISSUER)
     monkeypatch.setenv("DEVICE_CONTROL_RATE_LIMIT_PER_MINUTE", "100000")
+    monkeypatch.setenv("DEVICE_CONTROL_EVIDENCE_DIR", str(tmp_path / "evidence"))
+    monkeypatch.setenv("DEVICE_CONTROL_REQUIRE_HTTPS", "false")
+    monkeypatch.delenv("DEVICE_CONTROL_MANIFEST_HMAC_KEY", raising=False)
     if admin_token:
         monkeypatch.setenv("DEVICE_CONTROL_ADMIN_TOKEN", admin_token)
     else:
@@ -98,22 +107,30 @@ def approver_token(tenant: str = "tenant-a", subject: str = "human-approver") ->
                                                      "device.command.read"))
 
 
-def capability(
-    capability_id: str = "app.launch",
-    *,
-    version: str = "1.0.0",
-    risk_tier: str = "read",
-    input_schema: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def observed_capabilities(manifest_document: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    document = manifest_document or MANIFEST
+    items = []
+    for capability in document["capabilities"]:
+        items.append({
+            "id": capability["id"],
+            "version": capability["version"],
+            "input_schema": capability["input_schema"],
+            "output_schema": capability["output_schema"],
+            "risk_tier": capability["risk_tier"],
+            "execution_locality": "device",
+            "supports_idempotency": capability.get("supports_idempotency", False),
+            "max_timeout_ms": capability.get("timeout_ms", 15000),
+        })
+    return items
+
+
+def capability(capability_id: str = "app.launch", *,
+               version: str = "1.0.0", risk_tier: str = "read",
+               input_schema: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "id": capability_id,
         "version": version,
-        "input_schema": input_schema or {
-            "type": "object",
-            "required": ["app_id"],
-            "properties": {"app_id": {"type": "string"}},
-            "additionalProperties": True,
-        },
+        "input_schema": input_schema or {"type": "object", "additionalProperties": True},
         "output_schema": {"type": "object"},
         "risk_tier": risk_tier,
         "execution_locality": "device",
@@ -123,13 +140,22 @@ def capability(
 
 
 def create_gateway(client, headers: dict[str, str], *, tenant: str,
-                   gateway_id: str = "gw-1") -> str:
+                   gateway_id: str = "gw-1", endpoint_id: str | None = None,
+                   device_id: str | None = None,
+                   device_fingerprint: str | None = None,
+                   manifest_document: dict[str, Any] | None = None) -> str:
+    document = manifest_document or MANIFEST
+    document_digest = gateway_manifest.digest(document)
+    document_version = str(document["manifest_version"])
     created = client.post("/v1/gateways", json={
         "gateway_id": gateway_id,
         "protocol_version": "v1",
+        "endpoint_id": endpoint_id,
+        "device_id": device_id,
+        "device_fingerprint": device_fingerprint,
         "adapter_inventory": [{
-            "adapter_id": "fake-android", "version": "1.0.0",
-            "capabilities": ["app.launch", "ui.tap"],
+            "adapter_id": "fake-android", "version": "1.1.0",
+            "capabilities": [item["id"] for item in document["capabilities"]],
         }],
     }, headers=headers)
     assert created.status_code == 201, created.text
@@ -139,8 +165,18 @@ def create_gateway(client, headers: dict[str, str], *, tenant: str,
     })
     assert activated.status_code == 200, activated.text
     credential = activated.json()["credential"]
+    registered = client.put(f"/v1/gateways/{gateway_id}/manifest",
+                            json=document, headers=headers)
+    assert registered.status_code == 200, registered.text
     heartbeat = client.post(f"/v1/gateways/{gateway_id}/heartbeat", json={
-        "status": "online", "protocol_version": "v1",
+        "status": "online",
+        "protocol_version": "v1",
+        "manifest_digest": document_digest,
+        "manifest_version": document_version,
+        "endpoint_id": endpoint_id,
+        "device_id": device_id,
+        "device_fingerprint": device_fingerprint,
+        "queue_depth": 0,
     }, headers=bearer(credential))
     assert heartbeat.status_code == 200, heartbeat.text
     return credential
@@ -148,14 +184,18 @@ def create_gateway(client, headers: dict[str, str], *, tenant: str,
 
 def create_endpoint(client, headers: dict[str, str], *, tenant: str,
                     endpoint_id: str = "phone-1", gateway_id: str = "gw-1",
-                    capabilities: list[dict[str, Any]] | None = None) -> str:
-    capabilities = capabilities or [capability()]
+                    capabilities: list[dict[str, Any]] | None = None,
+                    device_id: str | None = None,
+                    device_fingerprint: str | None = None) -> str:
+    capabilities = capabilities or observed_capabilities()
     created = client.post("/v1/endpoints", json={
         "endpoint_id": endpoint_id,
         "tenant_ref": tenant,
         "gateway_id": gateway_id,
         "protocol_version": "v1",
         "capabilities": capabilities,
+        "device_id": device_id,
+        "device_fingerprint": device_fingerprint,
     }, headers=headers)
     assert created.status_code == 201, created.text
     credential = created.json()["credential"]
@@ -168,13 +208,25 @@ def create_endpoint(client, headers: dict[str, str], *, tenant: str,
 
 def setup_stack(client, *, tenant: str = "tenant-a", gateway_id: str = "gw-1",
                 endpoint_id: str = "phone-1",
-                capabilities: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                capabilities: list[dict[str, Any]] | None = None,
+                device_fingerprint: str = DEVICE_FINGERPRINT,
+                manifest_document: dict[str, Any] | None = None) -> dict[str, Any]:
     platform = bearer(admin_token())
-    gateway_credential = create_gateway(client, platform, tenant=tenant, gateway_id=gateway_id)
+    document = manifest_document or MANIFEST
+    device_id = f"device-{endpoint_id}"
+    gateway_credential = create_gateway(
+        client, platform, tenant=tenant, gateway_id=gateway_id,
+        endpoint_id=endpoint_id, device_id=device_id,
+        device_fingerprint=device_fingerprint, manifest_document=document,
+    )
     create_endpoint(client, platform, tenant=tenant, endpoint_id=endpoint_id,
-                    gateway_id=gateway_id, capabilities=capabilities)
+                    gateway_id=gateway_id,
+                    capabilities=capabilities or observed_capabilities(document),
+                    device_id=device_id, device_fingerprint=device_fingerprint)
     return {"tenant": tenant, "gateway_id": gateway_id, "endpoint_id": endpoint_id,
-            "gateway_credential": gateway_credential, "platform": platform}
+            "device_id": device_id, "device_fingerprint": device_fingerprint,
+            "gateway_credential": gateway_credential, "platform": platform,
+            "manifest_digest": gateway_manifest.digest(document)}
 
 
 def acquire_lease(client, token: str, *, endpoint_id: str, task_ref: str = "task-1",
@@ -197,7 +249,9 @@ def command_body(*, endpoint_id: str, lease_id: str, idempotency_key: str = "ide
                  capability_id: str = "app.launch", capability_version: str = "1.0.0",
                  input_payload: dict[str, Any] | None = None,
                  state_hash: str | None = None,
+                 state_version: str | None = None,
                  approval_id: str | None = None,
+                 approval_nonce: str | None = None,
                  intent: str = "Open the notes app",
                  task_ref: str = "task-1",
                  run_ref: str = "run-1",
@@ -214,7 +268,9 @@ def command_body(*, endpoint_id: str, lease_id: str, idempotency_key: str = "ide
         "idempotency_key": idempotency_key,
         "lease_id": lease_id,
         "state_hash": state_hash,
+        "state_version": state_version,
         "approval_id": approval_id,
+        "approval_nonce": approval_nonce,
         "task_ref": task_ref,
         "run_ref": run_ref,
         "correlation_id": "corr-1",

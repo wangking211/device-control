@@ -24,6 +24,13 @@ class GatewaySettings:
     heartbeat_interval_seconds: float
     poll_interval_seconds: float
     batch_size: int
+    endpoint_id: str
+    device_id: str
+    device_fingerprint: str
+    manifest_path: str
+    manifest_hmac_key: str
+    process_isolation: bool
+    state_max_age_seconds: float
 
 
 def from_env(env: dict[str, str] | None = None) -> GatewaySettings:
@@ -46,6 +53,14 @@ def from_env(env: dict[str, str] | None = None) -> GatewaySettings:
         heartbeat_interval_seconds=float(values.get("DEVICE_GATEWAY_HEARTBEAT_SECONDS") or 30),
         poll_interval_seconds=float(values.get("DEVICE_GATEWAY_POLL_SECONDS") or 2),
         batch_size=int(values.get("DEVICE_GATEWAY_BATCH_SIZE") or 5),
+        endpoint_id=(values.get("DEVICE_GATEWAY_ENDPOINT_ID") or "").strip(),
+        device_id=(values.get("DEVICE_GATEWAY_DEVICE_ID") or "").strip(),
+        device_fingerprint=(values.get("DEVICE_GATEWAY_DEVICE_FINGERPRINT") or "").strip(),
+        manifest_path=(values.get("DEVICE_GATEWAY_MANIFEST") or "").strip(),
+        manifest_hmac_key=(values.get("DEVICE_GATEWAY_MANIFEST_HMAC_KEY") or "").strip(),
+        process_isolation=(values.get("DEVICE_GATEWAY_PROCESS_ISOLATION") or "1").lower()
+        in {"1", "true", "yes"},
+        state_max_age_seconds=float(values.get("DEVICE_GATEWAY_STATE_MAX_AGE_SECONDS") or 15),
     )
     _validate(settings)
     return settings
@@ -54,6 +69,11 @@ def from_env(env: dict[str, str] | None = None) -> GatewaySettings:
 def _validate(settings: GatewaySettings) -> None:
     if not settings.control_url.startswith(("http://", "https://")):
         raise ValueError("DEVICE_CONTROL_URL must be an http(s) URL")
+    if settings.control_url.startswith("http://") and not (
+        settings.control_url.startswith("http://127.0.0.1")
+        or settings.control_url.startswith("http://localhost")
+    ):
+        raise ValueError("DEVICE_CONTROL_URL must use HTTPS outside loopback")
     if not settings.gateway_id:
         raise ValueError("DEVICE_GATEWAY_ID is required")
     if len(settings.credential) < 32:
@@ -67,5 +87,9 @@ def _validate(settings: GatewaySettings) -> None:
             raise ValueError("DEVICE_GATEWAY_SERIAL is required for the android adapter")
         if not settings.allowed_apps:
             raise ValueError("DEVICE_GATEWAY_ALLOWED_APPS is required for the android adapter")
+        if not settings.endpoint_id:
+            raise ValueError("DEVICE_GATEWAY_ENDPOINT_ID is required for the android adapter")
+        if not settings.device_fingerprint:
+            raise ValueError("DEVICE_GATEWAY_DEVICE_FINGERPRINT is required for the android adapter")
     if settings.queue_capacity < 1:
         raise ValueError("DEVICE_GATEWAY_QUEUE_SIZE must be positive")

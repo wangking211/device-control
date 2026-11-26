@@ -21,6 +21,7 @@ from .adapters.base import DeviceAdapter, NullAdapter
 from .adapters.fake import FakeAndroidAdapter
 from .config import GatewaySettings, from_env
 from .control_client import ControlPlaneClient
+from .isolation import DirectRunner, ProcessRunner, Runner
 from .ledger import DedupeLedger
 from .queue import BoundedQueue
 from .worker import GatewayWorker, WorkerConfig
@@ -35,10 +36,33 @@ def build_components(settings: GatewaySettings) -> tuple[GatewayWorker, DedupeLe
             allowed_apps=settings.allowed_apps,
         ))
     elif settings.adapter == "fake":
-        adapter = FakeAndroidAdapter(allowed_apps=set(settings.allowed_apps) or None)
+        adapter = FakeAndroidAdapter(
+            allowed_apps=set(settings.allowed_apps) or None,
+            device_fingerprint=settings.device_fingerprint or "fake-device-fingerprint",
+        )
     else:
         adapter = NullAdapter()
+    document = manifest.load(settings.manifest_path or None)
+    if settings.manifest_hmac_key:
+        if not manifest.verify(manifest.digest(document), document.get("signature"),
+                               settings.manifest_hmac_key):
+            raise ValueError("gateway manifest signature does not verify")
     ledger = DedupeLedger(settings.db_path)
+    runner: Runner
+    if settings.process_isolation and settings.adapter == "android":
+        runner = ProcessRunner(
+            settings.adapter,
+            {
+                "adb_path": settings.adb_path,
+                "serial": settings.serial,
+                "allowed_apps": sorted(settings.allowed_apps),
+                "device_fingerprint": settings.device_fingerprint,
+                "command_timeout_seconds": 15.0,
+            },
+            allowed_apps=settings.allowed_apps,
+        )
+    else:
+        runner = DirectRunner(adapter)
     worker = GatewayWorker(
         client=ControlPlaneClient(
             base_url=settings.control_url,
@@ -51,6 +75,12 @@ def build_components(settings: GatewaySettings) -> tuple[GatewayWorker, DedupeLe
         # Learned from the control plane on the first heartbeat. Empty until
         # then, which makes admission fail closed.
         tenant_ref="",
+        endpoint_id=settings.endpoint_id,
+        device_id=settings.device_id,
+        device_fingerprint=settings.device_fingerprint,
+        manifest_document=document,
+        state_max_age_seconds=settings.state_max_age_seconds,
+        runner=runner,
         config=WorkerConfig(
             heartbeat_interval_seconds=settings.heartbeat_interval_seconds,
             poll_interval_seconds=settings.poll_interval_seconds,

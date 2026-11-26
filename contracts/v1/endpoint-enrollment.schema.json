@@ -11,7 +11,9 @@
     "protocol_version": {"const": "v1"},
     "capabilities": {"type": "array", "items": {"$ref": "device-endpoint.schema.json#/$defs/capability"}},
     "metadata": {"type": "object", "additionalProperties": true},
-    "gateway_id": {"type": ["string", "null"], "maxLength": 200}
+    "gateway_id": {"type": ["string", "null"], "maxLength": 200},
+    "device_id": {"type": ["string", "null"], "maxLength": 200},
+    "device_fingerprint": {"type": ["string", "null"], "maxLength": 200}
   },
   "additionalProperties": false
 }

@@ -8,6 +8,9 @@
   "properties": {
     "gateway_id": {"type": "string", "minLength": 1, "maxLength": 200},
     "tenant_ref": {"type": ["string", "null"], "maxLength": 200},
+    "endpoint_id": {"type": ["string", "null"], "maxLength": 200},
+    "device_id": {"type": ["string", "null"], "maxLength": 200},
+    "device_fingerprint": {"type": ["string", "null"], "maxLength": 200},
     "display_name": {"type": ["string", "null"], "maxLength": 200},
     "protocol_version": {"const": "v1"},
     "adapter_inventory": {

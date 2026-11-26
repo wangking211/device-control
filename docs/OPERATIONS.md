@@ -19,6 +19,11 @@
 | `DEVICE_CONTROL_MAX_REQUEST_BYTES` | 262144 | payload cap |
 | `DEVICE_CONTROL_RATE_LIMIT_PER_MINUTE` | 240 | per token/client |
 | `DEVICE_CONTROL_EVENT_RETENTION_SECONDS` | 604800 | published events only |
+| `DEVICE_CONTROL_EVIDENCE_DIR` | `/data/evidence` | object store root |
+| `DEVICE_CONTROL_EVIDENCE_MAX_BYTES` | 8 MiB | upload cap |
+| `DEVICE_CONTROL_EVIDENCE_RETENTION_SECONDS` | 604800 | default retention |
+| `DEVICE_CONTROL_REQUIRE_HTTPS` | true in production | enforce TLS/forwarded proto |
+| `DEVICE_CONTROL_MANIFEST_HMAC_KEY` | empty | require signed manifests |
 
 Secrets belong in a secret manager or deployment secret facility. Never commit
 them, put them in query strings, or log them.

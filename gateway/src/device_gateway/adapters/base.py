@@ -42,6 +42,9 @@ class ActionResult:
     error_class: str | None = None
     retryable: bool = False
     reason: str | None = None
+    executed: bool = False
+    post_state: dict[str, Any] | None = None
+    artifact_bytes: bytes | None = None
 
 
 @runtime_checkable

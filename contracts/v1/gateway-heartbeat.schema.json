@@ -23,6 +23,13 @@
         "additionalProperties": false
       }
     },
+    "manifest_digest": {"type": ["string", "null"], "maxLength": 128},
+    "manifest_version": {"type": ["string", "null"], "maxLength": 100},
+    "endpoint_id": {"type": ["string", "null"], "maxLength": 200},
+    "device_id": {"type": ["string", "null"], "maxLength": 200},
+    "device_fingerprint": {"type": ["string", "null"], "maxLength": 200},
+    "queue_depth": {"type": ["integer", "null"], "minimum": 0},
+    "queue_age_seconds": {"type": ["number", "null"], "minimum": 0},
     "health": {"type": "object", "additionalProperties": true}
   },
   "additionalProperties": false

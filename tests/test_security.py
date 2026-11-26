@@ -5,15 +5,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi.testclient import TestClient
 from support import (
+    DEVICE_FINGERPRINT,
     acquire_lease,
     admin_token,
     agent_token,
     approver_token,
     bearer,
-    capability,
     command_body,
     configure,
     create_endpoint,
+    create_gateway,
     issue_token,
     setup_stack,
 )
@@ -23,38 +24,44 @@ from device_control.app import app
 
 client = TestClient(app)
 
-ASK_CAPABILITIES = [
-    capability("app.launch", risk_tier="read"),
-    capability("ui.send", risk_tier="write",
-               input_schema={"type": "object", "required": ["text"],
-                             "properties": {"text": {"type": "string"}},
-                             "additionalProperties": True}),
-]
 
-
-def _approval(client, agent, endpoint_id, lease_id, *, text="hello", state_hash="state-1"):
+def _approval(client, agent, endpoint_id, lease_id, *, text="hello", state_hash="state-1",
+              state_version="v1:state-1"):
     response = client.post("/v1/approvals", json={
         "endpoint_id": endpoint_id, "lease_id": lease_id,
-        "capability_id": "ui.send", "capability_version": "1.0.0",
-        "input": {"text": text}, "intent": "Send a message",
-        "action_type": "send", "state_hash": state_hash,
+        "capability_id": "ui.type_text", "capability_version": "1.0.0",
+        "input": {"target_ref": "field-search", "text": text},
+        "intent": "Type into search", "state_hash": state_hash,
+        "state_version": state_version,
     }, headers=bearer(agent))
     assert response.status_code == 201, response.text
-    return response.json()["approval_id"]
+    return response.json()
+
+
+def _text_command(stack, lease_id, approval, *, key="text-1", text="hello",
+                  state_hash="state-1", state_version="v1:state-1", intent="Type into search"):
+    return command_body(
+        endpoint_id=stack["endpoint_id"], lease_id=lease_id, idempotency_key=key,
+        capability_id="ui.type_text",
+        input_payload={"target_ref": "field-search", "text": text},
+        state_hash=state_hash, state_version=state_version,
+        approval_id=approval["approval_id"], approval_nonce=approval["approval_nonce"],
+        intent=intent,
+    )
 
 
 def test_forged_approver_identity_is_ignored_and_signature_is_verified(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
-    stack = setup_stack(client, capabilities=ASK_CAPABILITIES)
+    stack = setup_stack(client)
     agent = agent_token()
     lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"])
-    approval_id = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
+    approval = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
 
-    forged = client.post(f"/v1/approvals/{approval_id}/decision", json={
+    forged = client.post(f"/v1/approvals/{approval['approval_id']}/decision", json={
         "approved": True, "approver_ref": "admin-1", "approver_type": "admin",
     }, headers=bearer(approver_token()))
     assert forged.status_code == 200
-    record = store.get_approval("tenant-a", approval_id)
+    record = store.get_approval("tenant-a", approval["approval_id"])
     assert record["approver_ref"] == "human-approver"
     assert record["approver_type"] == "user"
 
@@ -64,7 +71,7 @@ def test_forged_approver_identity_is_ignored_and_signature_is_verified(tmp_path,
 
 def test_cross_tenant_access_is_hidden(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
-    stack = setup_stack(client, capabilities=ASK_CAPABILITIES)
+    stack = setup_stack(client)
     other = issue_token("intruder", "tenant-b", roles=("platform_admin",))
     assert client.get(f"/v1/endpoints/{stack['endpoint_id']}", headers=bearer(other)).status_code == 404
     assert client.get("/v1/endpoints", headers=bearer(other)).json()["items"] == []
@@ -72,8 +79,8 @@ def test_cross_tenant_access_is_hidden(tmp_path, monkeypatch):
     assert client.get("/v1/commands", headers=bearer(other)).json()["items"] == []
     agent = agent_token()
     lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"])
-    approval_id = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
-    assert client.post(f"/v1/approvals/{approval_id}/decision", json={"approved": True},
+    approval = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
+    assert client.post(f"/v1/approvals/{approval['approval_id']}/decision", json={"approved": True},
                        headers=bearer(issue_token("other-approver", "tenant-b",
                                                   permissions=("device.approval.decide",)))
                        ).status_code == 404
@@ -81,80 +88,74 @@ def test_cross_tenant_access_is_hidden(tmp_path, monkeypatch):
 
 def test_released_lease_blocks_approval_consumption(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
-    stack = setup_stack(client, capabilities=ASK_CAPABILITIES)
+    stack = setup_stack(client)
     agent = agent_token()
     lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"])
-    approval_id = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
-    assert client.post(f"/v1/approvals/{approval_id}/decision", json={"approved": True},
+    approval = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
+    assert client.post(f"/v1/approvals/{approval['approval_id']}/decision", json={"approved": True},
                        headers=bearer(approver_token())).status_code == 200
     assert client.delete(f"/v1/device-leases/{lease['lease_id']}",
                          headers=bearer(agent)).status_code == 200
-    body = command_body(endpoint_id=stack["endpoint_id"], lease_id=lease["lease_id"],
-                        idempotency_key="after-release", capability_id="ui.send",
-                        input_payload={"text": "hello"}, state_hash="state-1",
-                        approval_id=approval_id, intent="Send a message")
+    body = _text_command(stack, lease["lease_id"], approval, key="after-release")
     assert client.post("/v1/commands", json=body, headers=bearer(agent)).status_code == 409
-    assert store.get_approval("tenant-a", approval_id)["status"] == "invalidated"
+    assert store.get_approval("tenant-a", approval["approval_id"])["status"] == "invalidated"
 
 
 def test_revoked_endpoint_invalidates_approval_and_queued_commands(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
-    stack = setup_stack(client, capabilities=ASK_CAPABILITIES)
+    stack = setup_stack(client)
     agent = agent_token()
     lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"])
     queued = client.post("/v1/commands", json=command_body(
         endpoint_id=stack["endpoint_id"], lease_id=lease["lease_id"], idempotency_key="queued-1",
     ), headers=bearer(agent))
     assert queued.status_code == 201
-    approval_id = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
-    assert client.post(f"/v1/approvals/{approval_id}/decision", json={"approved": True},
+    approval = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
+    assert client.post(f"/v1/approvals/{approval['approval_id']}/decision", json={"approved": True},
                        headers=bearer(approver_token())).status_code == 200
     assert client.delete(f"/v1/endpoints/{stack['endpoint_id']}?tenant_ref=tenant-a",
                          headers=stack["platform"]).status_code == 200
     assert store.get_command("tenant-a", queued.json()["command_id"])["status"] == "cancelled"
-    assert store.get_approval("tenant-a", approval_id)["status"] == "invalidated"
+    assert store.get_approval("tenant-a", approval["approval_id"])["status"] == "invalidated"
 
 
-def test_approval_binds_parameters_version_and_state_hash(tmp_path, monkeypatch):
+def test_approval_binds_parameters_version_state_and_device(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
-    stack = setup_stack(client, capabilities=ASK_CAPABILITIES)
+    stack = setup_stack(client)
     agent = agent_token()
     lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"])
-    approval_id = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
-    assert client.post(f"/v1/approvals/{approval_id}/decision", json={"approved": True},
+    approval = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
+    assert client.post(f"/v1/approvals/{approval['approval_id']}/decision", json={"approved": True},
                        headers=bearer(approver_token())).status_code == 200
 
-    tampered = command_body(endpoint_id=stack["endpoint_id"], lease_id=lease["lease_id"],
-                            idempotency_key="tamper-1", capability_id="ui.send",
-                            input_payload={"text": "different"}, state_hash="state-1",
-                            approval_id=approval_id, intent="Send a message")
+    tampered = _text_command(stack, lease["lease_id"], approval, key="tamper-1", text="different")
     response = client.post("/v1/commands", json=tampered, headers=bearer(agent))
     assert response.status_code == 409
     assert response.json()["code"] == "approval_binding_mismatch"
 
-    changed_state = command_body(endpoint_id=stack["endpoint_id"], lease_id=lease["lease_id"],
-                                 idempotency_key="tamper-2", capability_id="ui.send",
-                                 input_payload={"text": "hello"}, state_hash="state-2",
-                                 approval_id=approval_id, intent="Send a message")
+    changed_state = _text_command(stack, lease["lease_id"], approval, key="tamper-2",
+                                  state_hash="state-2", state_version="v1:state-2")
     assert client.post("/v1/commands", json=changed_state,
+                       headers=bearer(agent)).json()["code"] == "approval_binding_mismatch"
+
+    wrong_nonce = {**_text_command(stack, lease["lease_id"], approval, key="tamper-3"),
+                   "approval_nonce": "not-the-nonce"}
+    assert client.post("/v1/commands", json=wrong_nonce,
                        headers=bearer(agent)).json()["code"] == "approval_binding_mismatch"
 
 
 def test_concurrent_approval_consumption_succeeds_at_most_once(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
-    stack = setup_stack(client, capabilities=ASK_CAPABILITIES)
+    stack = setup_stack(client)
     agent = agent_token()
     lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"])
-    approval_id = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
-    assert client.post(f"/v1/approvals/{approval_id}/decision", json={"approved": True},
+    approval = _approval(client, agent, stack["endpoint_id"], lease["lease_id"])
+    assert client.post(f"/v1/approvals/{approval['approval_id']}/decision", json={"approved": True},
                        headers=bearer(approver_token())).status_code == 200
 
     def submit(key: str) -> int:
         thread_client = TestClient(app)
-        body = command_body(endpoint_id=stack["endpoint_id"], lease_id=lease["lease_id"],
-                            idempotency_key=key, capability_id="ui.send",
-                            input_payload={"text": "hello"}, state_hash="state-1",
-                            approval_id=approval_id, intent="Send a message")
+        body = _text_command(stack, lease["lease_id"], approval, key=key)
         return thread_client.post("/v1/commands", json=body, headers=bearer(agent)).status_code
 
     barrier = threading.Barrier(2)
@@ -250,8 +251,8 @@ def test_versioned_migration_preserves_legacy_records(tmp_path, monkeypatch):
 
     monkeypatch.setenv("DEVICE_CONTROL_DB", str(legacy))
     monkeypatch.setenv("DEVICE_CONTROL_ENV", "test")
-    apples = store.initialize()
-    assert 1 in apples and 4 in apples, apples
+    applied = store.initialize()
+    assert 1 in applied and 5 in applied, applied
     endpoint = store.get_endpoint("tenant-a", "legacy-phone")
     assert endpoint["status"] == "online"
     assert store.active_lease("tenant-a", "legacy-lease", "legacy-phone")["holder_ref"] == "agent-1"
@@ -281,7 +282,12 @@ def test_service_token_shape_and_audience_are_verified(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
     monkeypatch.setenv("DEVICE_CONTROL_IDENTITY_AUDIENCE", "device-control")
     stack = setup_stack(client)
-    create_endpoint(client, stack["platform"], tenant="tenant-a", endpoint_id="phone-2")
+    create_gateway(client, stack["platform"], tenant="tenant-a", gateway_id="gw-2",
+                   endpoint_id="phone-2", device_id="device-phone-2",
+                   device_fingerprint=DEVICE_FINGERPRINT)
+    create_endpoint(client, stack["platform"], tenant="tenant-a", endpoint_id="phone-2",
+                    gateway_id="gw-2", device_id="device-phone-2",
+                    device_fingerprint=DEVICE_FINGERPRINT)
     extra = {
         "contract_version": "1.0",
         "actor": {"actor_type": "service", "service_id": "mindos"},

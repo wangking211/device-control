@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-LATEST_VERSION = 4
+LATEST_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -213,8 +213,7 @@ CREATE TABLE IF NOT EXISTS audit_records (
 )
 """
 
-MIGRATIONS: tuple[Migration, ...] = (
-    Migration(
+MIGRATIONS: tuple[Migration, ...] = (    Migration(
         1,
         "baseline_reconcile_endpoints_leases_approvals",
         (
@@ -265,6 +264,42 @@ MIGRATIONS: tuple[Migration, ...] = (
             "ON device_commands(status, deadline)",
         ),
     ),
+    Migration(
+        5,
+        "dc006_manifest_device_binding_approval_v2",
+        (
+            "CREATE TABLE IF NOT EXISTS gateway_manifest_revisions ("
+            " revision_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " gateway_id TEXT NOT NULL, tenant_ref TEXT NOT NULL,"
+            " manifest_version TEXT NOT NULL, digest TEXT NOT NULL,"
+            " signature TEXT, manifest_json TEXT NOT NULL,"
+            " registered_by TEXT, registered_at TEXT NOT NULL,"
+            " UNIQUE(gateway_id, digest))",
+            "CREATE INDEX IF NOT EXISTS ix_manifest_revisions_gateway "
+            "ON gateway_manifest_revisions(tenant_ref, gateway_id, registered_at)",
+        ),
+    ),
+    Migration(
+        6,
+        "dc007_evidence_metadata",
+        (
+            "CREATE TABLE IF NOT EXISTS device_evidence ("
+            " evidence_id TEXT PRIMARY KEY, tenant_ref TEXT NOT NULL,"
+            " gateway_id TEXT NOT NULL, endpoint_id TEXT NOT NULL, device_id TEXT,"
+            " command_id TEXT, task_ref TEXT, run_ref TEXT, correlation_id TEXT,"
+            " evidence_type TEXT NOT NULL, mime_type TEXT NOT NULL,"
+            " content_sha256 TEXT NOT NULL, size_bytes INTEGER NOT NULL,"
+            " captured_at TEXT NOT NULL, redaction_status TEXT NOT NULL,"
+            " retention_until TEXT, storage_ref TEXT NOT NULL,"
+            " access_policy TEXT NOT NULL DEFAULT 'tenant_command_read',"
+            " created_at TEXT NOT NULL, deleted_at TEXT,"
+            " UNIQUE(storage_ref))",
+            "CREATE INDEX IF NOT EXISTS ix_evidence_command "
+            "ON device_evidence(tenant_ref, command_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_evidence_retention "
+            "ON device_evidence(retention_until, deleted_at)",
+        ),
+    ),
 )
 
 
@@ -300,6 +335,8 @@ def apply(connection: sqlite3.Connection) -> list[int]:
             if migration.version == 1:
                 _adopt_legacy_endpoints(connection)
                 _rebuild_approvals(connection)
+            if migration.version == 5:
+                _adopt_dc006(connection)
             connection.execute(
                 "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                 (migration.version, migration.name, now_iso()),
@@ -383,6 +420,68 @@ def _rebuild_approvals(connection: sqlite3.Connection) -> None:
         )
     connection.execute("DROP TABLE device_approvals")
     connection.execute("ALTER TABLE device_approvals_next RENAME TO device_approvals")
+
+
+def _adopt_dc006(connection: sqlite3.Connection) -> None:
+    additions = {
+        "device_endpoints": {
+            "device_id": "TEXT",
+            "device_fingerprint": "TEXT",
+            "paired_at": "TEXT",
+        },
+        "device_gateways": {
+            "endpoint_id": "TEXT",
+            "device_id": "TEXT",
+            "device_fingerprint": "TEXT",
+            "manifest_version": "TEXT",
+            "manifest_digest": "TEXT",
+            "manifest_json": "TEXT",
+            "manifest_updated_at": "TEXT",
+            "reported_manifest_digest": "TEXT",
+            "health_json": "TEXT NOT NULL DEFAULT '{}'",
+            "queue_depth": "INTEGER",
+            "queue_age_seconds": "REAL",
+            "last_error": "TEXT",
+        },
+        "device_approvals": {
+            "operation": "TEXT NOT NULL DEFAULT ''",
+            "device_id": "TEXT",
+            "device_fingerprint": "TEXT",
+            "state_version": "TEXT",
+            "manifest_digest": "TEXT NOT NULL DEFAULT ''",
+            "approval_nonce": "TEXT NOT NULL DEFAULT ''",
+        },
+        "device_commands": {
+            "operation": "TEXT NOT NULL DEFAULT ''",
+            "device_id": "TEXT",
+            "device_fingerprint": "TEXT",
+            "state_version": "TEXT",
+            "manifest_digest": "TEXT NOT NULL DEFAULT ''",
+            "approval_nonce": "TEXT",
+        },
+    }
+    for table, columns in additions.items():
+        existing = _columns(connection, table)
+        for column, definition in columns.items():
+            if column not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_endpoint_device_id "
+        "ON device_endpoints(tenant_ref, device_id) WHERE device_id IS NOT NULL"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_gateway_endpoint_binding "
+        "ON device_gateways(tenant_ref, endpoint_id) WHERE endpoint_id IS NOT NULL"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_endpoints_gateway_binding "
+        "ON device_endpoints(tenant_ref, gateway_id, device_fingerprint)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS ix_gateways_manifest "
+        "ON device_gateways(tenant_ref, manifest_digest)"
+    )
 
 
 def _ensure_indexes(connection: sqlite3.Connection) -> None:

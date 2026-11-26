@@ -5,9 +5,11 @@ Environment for this run (2026-11-26):
 - Windows, Python 3.12.9, pytest 9.1.1, FastAPI 0.116.1, jsonschema 4.26.0
 - No `adb` on PATH, no Android emulator/device, no Docker daemon
 - Command: `python -m pytest -q` from `products/device-control`
-- Result: **57 passed** (35 control-plane tests + 22 gateway/adapter tests)
-  - `python -m ruff check src tests gateway/src gateway/tests scripts` → pass
-  - `python -m mypy src/device_control gateway/src/device_gateway --ignore-missing-imports` → pass
+- Result: **87 passed** (control-plane + gateway/adapter + evidence/ops tests)
+  - `python -m ruff check ...` → pass
+  - `python -m mypy src/device_control gateway/src/device_gateway` → pass
+  - `bandit -c .bandit -r src gateway/src` → 0 issues, only `B101` globally skipped
+  - `pip-audit -r requirements/audit.txt` → no known vulnerabilities
 
 Legend: PASS = executed here; BLOCKED = requires hardware/runtime not present;
 N/A = not applicable to this product.
@@ -79,13 +81,67 @@ production until the real-device rows pass.
 | E2E harmless Android scenario passes | PASS (fake adapter in-process) / **BLOCKED** (real Android + MindOS) | `test_end_to_end_fake_android_loop`, `test_user_takeover_pauses_and_disconnect_is_uncertain` |
 | Negative tests: offline, wrong tenant, expired lease, missing approval, changed state, adapter crash | PASS | `test_submission_negative_paths`, `test_offline_endpoint_blocks_command`, `test_changed_state_is_rejected_before_execution`, `test_adapter_crash_and_timeout_become_uncertain` |
 
+## DC-006 Security execution (release blocker)
+
+| Criterion | Result | Evidence |
+| --- | --- | --- |
+| Manifest risk/operation authoritative; envelope downgrade rejected | PASS | `test_manifest_digest_operation_and_risk_cannot_be_downgraded`, `test_manifest_risk_is_authoritative_even_if_envelope_downgrades` |
+| Manifest missing/tampered/signature/digest rejected | PASS | `test_manifest_signature_is_required_when_configured`, `test_manifest_digest_drift_blocks_dispatch` |
+| Parameters schema validated | PASS | `test_typed_parameters_are_validated` |
+| Approval binds operation/device/endpoint/parameters/state/policy/nonce | PASS | `test_approval_binds_parameters_version_state_and_device`, `test_concurrent_approval_consumption_succeeds_at_most_once` |
+| Endpoint↔device fingerprint binding | PASS (automated) / **BLOCKED** (real swap) | `test_endpoint_device_fingerprint_binding`; real device swap needs hardware |
+| State hash/version missing/stale/changed rejected | PASS | `test_state_dependent_capability_requires_hash_and_version`, `test_state_missing_or_stale_is_rejected`, `test_changed_state_is_rejected_before_execution` |
+| Caller labels cannot bypass sensitive control detection | PASS | `test_secret_fields_allowlist_and_state_are_enforced`, `test_adb_rejects_password_control_and_does_not_type` |
+| Secrets absent from logs/results/evidence | PASS | `test_typed_text_is_not_echoed_in_result_or_evidence`, `test_secrets_are_absent_from_responses_and_logs` |
+| Adapter hard timeout/kill/rebuild; uncertain non-idempotent not replayed | PASS (fake adapter) | `gateway/tests/test_isolation.py`, `test_duplicate_uncertain_non_idempotent_is_not_reexecuted` |
+| tap/type/screenshot verification failure not success | PASS | `test_executed_unverified_is_not_success`, `test_succeeded_requires_verification`, adapter `executed_unverified` paths |
+| Bandit config parse/failure blocking/dependency audit | PASS | `tests/test_ci_security.py`; Bandit 1.9.4 clean with only `B101` skipped; `pip-audit -r requirements/audit.txt` no findings |
+
+## DC-007 Android/Evidence
+
+| Criterion | Result | Evidence |
+| --- | --- | --- |
+| Structured discovery (device/unauthorized/offline) | PASS (stub) / **BLOCKED** (real) | `test_discovery_reports_unauthorized_and_offline` |
+| Accessibility node summary, redacted | PASS (stub) | `test_adb_parses_ui_nodes_and_hashes_screenshots`; text never exposed |
+| Real device full loop | **BLOCKED** | No adb/emulator/device; run `docs/android/ANDROID_SETUP_AND_RUNBOOK.md` |
+| Evidence metadata + object bytes + hash + retention + access | PASS (local store) | `tests/test_evidence.py`, `gateway/tests/test_worker_e2e.py::test_screenshot_artifact_uploads_evidence` |
+| Real Evidence object storage/durability | **BLOCKED** | Local FS adapter only; production object store required |
+| Disconnect/restart/replug reconcile, no replay | PASS (fake) / **BLOCKED** (real) | `test_user_takeover_pauses_and_disconnect_is_uncertain`, command timeout/late-result tests |
+| Manual pause/resume | PASS (gateway local) | worker pause/resume test; no cloud round-trip |
+| Diagnostics | PASS | `test_gateway_diagnostics_exposes_health_without_secrets`, `/v1/alerts` |
+
+## DC-008 MindOS/contract governance
+
+| Criterion | Result | Evidence |
+| --- | --- | --- |
+| Contract mapping documented | PASS | `docs/contracts/MINDOS_DEVICE_INTENT_MAPPING.md` |
+| OpenAPI 3.x exported | PASS | `contracts/openapi-v1.json`, `tests/test_openapi.py`, CI drift check |
+| Provider with auth/timeout/retry/idempotency/error mapping/trace | PASS | `examples/mindos_provider.py`, `tests/test_mindos_contract.py` |
+| Live MindOS API call + TaskRun E2E | **BLOCKED** | No MindOS runtime; MindOS tree dirty; consumer contract tests delivered |
+| Cross-tenant/actor spoof rejection | PASS | `test_provider_rejects_cross_tenant_and_actor_spoofing` |
+| Uncertain non-idempotent not auto-retried | PASS | provider retry policy + command tests |
+
+## DC-009 Production operations
+
+| Criterion | Result | Evidence |
+| --- | --- | --- |
+| Docker repeatable start/persistence/backup | **BLOCKED** | No Docker daemon; Dockerfile/compose/backup script delivered |
+| Backup/restore integrity tooling | PASS (local) | `tests/test_operations.py::test_sqlite_backup_and_integrity_manifest` |
+| TLS/mTLS + credential lifecycle | PARTIAL / **BLOCKED** (mTLS run) | HTTPS enforcement middleware; rotation/revocation tests; no ingress here |
+| Gateway preflight + signed upgrade | PASS (tooling) | `test_gateway_preflight_blocks_insecure_transport`, `test_signed_upgrade_is_verified_or_rejected` |
+| Device management API/UI | PASS (static shell) | `/admin` test; APIs listed in `docs/API.md` |
+| Monitoring/alerts/audit | PASS | `/v1/metrics`, `/v1/alerts`, diagnostics, audit tests |
+| Tenant isolation | PASS | `test_cross_tenant_access_is_hidden` and evidence tenant tests |
+
 ## Conclusion
 
-- DC-002: code and automated acceptance **PASS**; Docker persistence **BLOCKED**.
-- DC-003: protocol and lifecycle **PASS**; TLS/mTLS/multi-instance **BLOCKED**.
-- DC-004: adapter/worker **PASS** with fake adapter; real Android **BLOCKED**.
-- DC-005: state machine/idempotency/verification/events **PASS**; live MindOS
-  TaskRun correlation and real-device E2E **BLOCKED**.
+- DC-006: automated security gates **PASS**; real-device safety remains BLOCKED.
+- DC-007: evidence/observation/diagnostics code and fake-adapter loop PASS; real
+  Android and durable object storage BLOCKED.
+- DC-008: OpenAPI/mapping/provider contract tests PASS; live MindOS E2E BLOCKED.
+- DC-009: scripts/HTTPS/admin/alerts PASS locally; Docker/TLS/mTLS acceptance
+  BLOCKED.
 
-Do not declare production-ready until every BLOCKED row has command output,
-environment details and (for devices) redacted evidence recorded here.
+Overall release decision: **NO-GO** until every BLOCKED row is executed on real
+hardware/Docker/MindOS and recorded here. Closing scanners or using the fake
+adapter is not accepted as PASS for Gate B.

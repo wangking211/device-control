@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+﻿from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from support import (
@@ -54,7 +54,7 @@ def _submit_and_pull(stack, agent, lease, *, key="cmd-1", capability_id="app.lau
 
 def test_full_command_state_machine_is_audited(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
-    stack = setup_stack(client, capabilities=ASK_CAPABILITIES)
+    stack = setup_stack(client)
     agent = agent_token()
     lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"], run_ref="run-9")
     command_id = _submit_and_pull(stack, agent, lease, run_ref="run-9")
@@ -84,7 +84,7 @@ def test_full_command_state_machine_is_audited(tmp_path, monkeypatch):
     evidence = client.get(f"/v1/commands/{command_id}/evidence", headers=bearer(agent))
     assert evidence.status_code == 200
     assert evidence.json()["evidence_refs"] == ["sha256:abc"]
-    assert evidence.json()["retention"] == "gateway_managed"
+    assert evidence.json()["retention"] == "evidence_store_managed"
 
     events = client.get("/v1/events", headers=bearer(agent)).json()["items"]
     assert any(event["event_type"] == "command.succeeded" and event["run_ref"] == "run-9"
@@ -189,13 +189,15 @@ def test_timeout_and_late_result_are_reconciled_without_reopening(tmp_path, monk
 
 def test_submission_negative_paths(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
-    stack = setup_stack(client, capabilities=ASK_CAPABILITIES)
+    stack = setup_stack(client)
     agent = agent_token()
     lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"])
 
     missing_approval = client.post("/v1/commands", json=command_body(
         endpoint_id=stack["endpoint_id"], lease_id=lease["lease_id"], idempotency_key="neg-1",
-        capability_id="ui.send", input_payload={"text": "hello"},
+        capability_id="ui.type_text",
+        input_payload={"target_ref": "field-search", "text": "hello"},
+        state_hash="state-1", state_version="v1:state-1",
     ), headers=bearer(agent))
     assert missing_approval.status_code == 409
     assert missing_approval.json()["code"] == "approval_required"
@@ -253,3 +255,33 @@ def test_gateway_pull_expires_overdue_commands(tmp_path, monkeypatch):
     assert pulled.status_code == 200
     assert pulled.json()["items"] == []
     assert store.get_command("tenant-a", queued["command_id"])["status"] == "expired"
+
+
+def test_state_dependent_capability_requires_hash_and_version(tmp_path, monkeypatch):
+    configure(monkeypatch, tmp_path)
+    stack = setup_stack(client)
+    agent = agent_token()
+    lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"])
+    response = client.post("/v1/commands", json=command_body(
+        endpoint_id=stack["endpoint_id"], lease_id=lease["lease_id"],
+        idempotency_key="state-missing", capability_id="ui.tap",
+        input_payload={"target_ref": "button-continue", "bounds": [0, 40, 10, 50]},
+    ), headers=bearer(agent))
+    assert response.status_code == 422
+    assert response.json()["code"] == "state_hash_and_version_required"
+
+
+def test_executed_unverified_is_not_success(tmp_path, monkeypatch):
+    configure(monkeypatch, tmp_path)
+    stack = setup_stack(client)
+    agent = agent_token()
+    lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"])
+    command_id = _submit_and_pull(stack, agent, lease, key="unverified-1")
+    result = client.post(f"/v1/gateways/{stack['gateway_id']}/commands/{command_id}/result",
+                         json={"status": "executed_unverified", "executed": True,
+                               "reason": "tap produced no observable change"},
+                         headers=bearer(stack["gateway_credential"]))
+    assert result.status_code == 200, result.text
+    command = store.get_command("tenant-a", command_id)
+    assert command["status"] == "uncertain"
+    assert command["status_reason"] == "tap produced no observable change"

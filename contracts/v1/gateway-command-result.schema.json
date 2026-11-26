@@ -8,8 +8,8 @@
   "properties": {
     "status": {
       "enum": [
-        "received", "accepted", "executing", "succeeded", "failed", "rejected",
-        "timed_out", "cancelled", "uncertain"
+        "received", "accepted", "executing", "succeeded", "executed_unverified",
+        "failed", "rejected", "timed_out", "cancelled", "uncertain"
       ]
     },
     "reason": {"type": ["string", "null"], "maxLength": 1000},
@@ -20,6 +20,7 @@
       ]
     },
     "retryable": {"type": "boolean"},
+    "executed": {"type": "boolean"},
     "output": {"type": ["object", "null"]},
     "verification": {
       "type": ["object", "null"],

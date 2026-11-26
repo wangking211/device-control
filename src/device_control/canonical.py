@@ -1,14 +1,14 @@
-"""Canonical JSON and digest helpers shared by the control plane.
+"""Canonical JSON, digest and manifest-signature helpers.
 
-Every digest that binds an approval, a command or an idempotency record is
-computed here so two call sites cannot drift. ``json.dumps`` with sorted keys
-and no whitespace is the canonical form for objects that only contain JSON
-values. Unknown objects fail closed instead of being silently stringified.
+Every digest that binds a manifest, approval or command is computed here so
+two call sites cannot drift. ``json.dumps`` with sorted keys and no whitespace
+is the canonical form for objects that only contain JSON values.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from typing import Any, Mapping
 
@@ -33,18 +33,55 @@ def digest_object(value: Any) -> str:
     return sha256_hex(canonical_json(value))
 
 
+MANIFEST_DIGEST_FIELDS = (
+    "manifest_id",
+    "manifest_version",
+    "protocol_version",
+    "endpoint_id",
+    "device_id",
+    "device_fingerprint",
+    "capabilities",
+)
+
+
+def manifest_payload(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    return {field: manifest[field] for field in MANIFEST_DIGEST_FIELDS if field in manifest}
+
+
+def manifest_digest(manifest: Mapping[str, Any]) -> str:
+    return digest_object(manifest_payload(manifest))
+
+
+def sign_manifest(digest: str, key: str) -> str:
+    if len(key.encode("utf-8")) < 32:
+        raise ValueError("manifest signing key must be at least 32 bytes")
+    return hmac.new(key.encode("utf-8"), digest.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def verify_manifest_signature(digest: str, signature: str, key: str) -> bool:
+    if not signature or len(key.encode("utf-8")) < 32:
+        return False
+    return hmac.compare_digest(sign_manifest(digest, key), signature)
+
+
 APPROVAL_BINDING_FIELDS = (
     "tenant_ref",
     "endpoint_id",
+    "device_id",
+    "device_fingerprint",
     "gateway_id",
     "capability_id",
     "capability_version",
+    "operation",
     "parameters",
     "intent",
     "requester_ref",
     "lease_id",
     "policy_version",
+    "manifest_digest",
     "state_hash",
+    "state_version",
+    "approval_nonce",
 )
 
 
@@ -61,27 +98,39 @@ def approval_binding_digest(
     lease_id: str,
     policy_version: str,
     state_hash: str | None,
+    operation: str = "",
+    device_id: str | None = None,
+    device_fingerprint: str | None = None,
+    manifest_digest_value: str = "",
+    state_version: str | None = None,
+    approval_nonce: str = "",
 ) -> str:
     """Bind an approval to the exact action it authorizes.
 
-    ``state_hash`` is the gateway's last observed screen/state digest. It is
-    allowed to be ``None`` only for capabilities that do not observe state;
-    callers must not substitute a fresh hash after the user decided.
+    ``state_hash``/``state_version`` are required for capabilities whose
+    manifest declares a state precondition; callers must not substitute a
+    fresh state after the user decided.
     """
 
     return digest_object(
         {
             "tenant_ref": tenant_ref,
             "endpoint_id": endpoint_id,
+            "device_id": device_id,
+            "device_fingerprint": device_fingerprint,
             "gateway_id": gateway_id,
             "capability_id": capability_id,
             "capability_version": capability_version,
+            "operation": operation,
             "parameters": parameters,
             "intent": intent,
             "requester_ref": requester_ref,
             "lease_id": lease_id,
             "policy_version": policy_version,
+            "manifest_digest": manifest_digest_value,
             "state_hash": state_hash,
+            "state_version": state_version,
+            "approval_nonce": approval_nonce,
         }
     )
 
@@ -94,14 +143,20 @@ def command_payload_hash(
     intent: str,
     deadline: str,
     state_hash: str | None,
+    operation: str = "",
+    state_version: str | None = None,
+    manifest_digest_value: str = "",
 ) -> str:
     return digest_object(
         {
             "capability_id": capability_id,
             "capability_version": capability_version,
+            "operation": operation,
             "parameters": parameters,
             "intent": intent,
             "deadline": deadline,
             "state_hash": state_hash,
+            "state_version": state_version,
+            "manifest_digest": manifest_digest_value,
         }
     )

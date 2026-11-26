@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator, Sequence
 
 from device_control import commands as command_rules
-from device_control import config, schema
+from device_control import config, policy, schema
 from device_control.canonical import (
     approval_binding_digest,
     command_payload_hash,
@@ -143,6 +143,11 @@ def _gateway(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     data = dict(row)
     data["adapter_inventory"] = _json(data.pop("adapter_inventory_json", "[]"), [])
     data["platform"] = _json(data.pop("platform_json", "{}"), {})
+    data["health"] = _json(data.pop("health_json", "{}"), {})
+    if data.get("manifest_json"):
+        data["manifest"] = _json(data.pop("manifest_json"), None)
+    else:
+        data.pop("manifest_json", None)
     return data
 
 
@@ -244,6 +249,8 @@ def enroll_endpoint(
     gateway_id: str | None,
     capabilities: list[dict[str, Any]],
     metadata: dict[str, Any] | None = None,
+    device_id: str | None = None,
+    device_fingerprint: str | None = None,
 ) -> str:
     credential = _credential("dc_ep")
     credential_hash = hash_credential(credential)
@@ -257,12 +264,21 @@ def enroll_endpoint(
                 raise hidden()
             if gateway and gateway["status"] in {"enrollment_pending", "revoked"}:
                 raise conflict("gateway_not_trusted")
+            if gateway:
+                if gateway.get("endpoint_id") and gateway["endpoint_id"] != endpoint_id:
+                    raise conflict("gateway_endpoint_binding_mismatch")
+                bound_fingerprint = gateway.get("device_fingerprint")
+                if bound_fingerprint and device_fingerprint != bound_fingerprint:
+                    raise conflict("device_identity_mismatch")
+                if bound_fingerprint and not device_fingerprint:
+                    raise invalid("device_fingerprint_required")
             try:
                 tx.execute(
                     "INSERT INTO device_endpoints (endpoint_id, tenant_ref, node_ref, gateway_id,"
                     " credential_hash, status, capabilities_json, observed_at,"
-                    " credential_expires_at, last_heartbeat_at, metadata_json)"
-                    " VALUES (?, ?, ?, ?, ?, 'offline', ?, ?, ?, NULL, ?)",
+                    " credential_expires_at, last_heartbeat_at, metadata_json, device_id,"
+                    " device_fingerprint, paired_at)"
+                    " VALUES (?, ?, ?, ?, ?, 'offline', ?, ?, ?, NULL, ?, ?, ?, ?)",
                     (
                         endpoint_id,
                         tenant,
@@ -273,6 +289,9 @@ def enroll_endpoint(
                         timestamp,
                         expires_at,
                         json.dumps(metadata or {}, sort_keys=True),
+                        device_id,
+                        device_fingerprint,
+                        timestamp if device_fingerprint else None,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -286,7 +305,11 @@ def enroll_endpoint(
                 resource_type="device_endpoint",
                 resource_id=endpoint_id,
                 outcome="allowed",
-                detail={"gateway_id": gateway_id, "capability_count": len(capabilities)},
+                detail={
+                    "gateway_id": gateway_id,
+                    "capability_count": len(capabilities),
+                    "device_fingerprint_present": bool(device_fingerprint),
+                },
             )
             _event(
                 tx,
@@ -294,7 +317,8 @@ def enroll_endpoint(
                 event_type="endpoint.enrolled",
                 aggregate_type="device_endpoint",
                 aggregate_id=endpoint_id,
-                payload={"endpoint_id": endpoint_id, "gateway_id": gateway_id},
+                payload={"endpoint_id": endpoint_id, "gateway_id": gateway_id,
+                         "device_id": device_id},
             )
     finally:
         db.close()
@@ -580,6 +604,9 @@ def create_gateway(
     display_name: str | None,
     protocol_version: str,
     adapter_inventory: list[dict[str, Any]],
+    endpoint_id: str | None = None,
+    device_id: str | None = None,
+    device_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     db = connect()
     try:
@@ -587,8 +614,9 @@ def create_gateway(
             try:
                 tx.execute(
                     "INSERT INTO device_gateways (gateway_id, tenant_ref, display_name, status,"
-                    " protocol_version, adapter_inventory_json, enrolled_at)"
-                    " VALUES (?, ?, ?, 'enrollment_pending', ?, ?, ?)",
+                    " protocol_version, adapter_inventory_json, enrolled_at, endpoint_id,"
+                    " device_id, device_fingerprint)"
+                    " VALUES (?, ?, ?, 'enrollment_pending', ?, ?, ?, ?, ?, ?)",
                     (
                         gateway_id,
                         tenant,
@@ -596,6 +624,9 @@ def create_gateway(
                         protocol_version,
                         json.dumps(adapter_inventory, sort_keys=True),
                         iso(),
+                        endpoint_id,
+                        device_id,
+                        device_fingerprint,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -641,7 +672,7 @@ def _find_credential(
 ) -> sqlite3.Row | None:
     placeholders = ",".join("?" for _ in purposes)
     rows = tx.execute(
-        f"SELECT * FROM gateway_credentials WHERE gateway_id=? AND purpose IN ({placeholders})"
+        f"SELECT * FROM gateway_credentials WHERE gateway_id=? AND purpose IN ({placeholders})"  # nosec B608
         " AND revoked_at IS NULL",
         (gateway_id, *purposes),
     ).fetchall()
@@ -742,12 +773,128 @@ def authenticate_gateway(
     return gateway
 
 
+def register_gateway_manifest(
+    *,
+    tenant: str,
+    gateway_id: str,
+    manifest: dict[str, Any],
+    digest: str,
+    signature: str | None,
+    actor: str,
+    actor_type: str,
+) -> dict[str, Any]:
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            row = tx.execute(
+                "SELECT * FROM device_gateways WHERE gateway_id=? AND tenant_ref=?",
+                (gateway_id, tenant),
+            ).fetchone()
+            if row is None or row["status"] == "revoked":
+                raise hidden()
+            gateway = _gateway(row)
+            endpoint_id = manifest.get("endpoint_id")
+            device_id = manifest.get("device_id")
+            fingerprint = manifest.get("device_fingerprint")
+            if endpoint_id and gateway.get("endpoint_id") and endpoint_id != gateway["endpoint_id"]:
+                raise conflict("gateway_endpoint_binding_mismatch")
+            if fingerprint and gateway.get("device_fingerprint") and fingerprint != gateway["device_fingerprint"]:
+                raise conflict("device_identity_mismatch")
+            revision = tx.execute(
+                "SELECT 1 FROM gateway_manifest_revisions WHERE gateway_id=? AND digest=?",
+                (gateway_id, digest),
+            ).fetchone()
+            if revision is None:
+                tx.execute(
+                    "INSERT INTO gateway_manifest_revisions (gateway_id, tenant_ref,"
+                    " manifest_version, digest, signature, manifest_json, registered_by,"
+                    " registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        gateway_id,
+                        tenant,
+                        str(manifest.get("manifest_version") or ""),
+                        digest,
+                        signature,
+                        json.dumps(manifest, sort_keys=True),
+                        actor,
+                        iso(),
+                    ),
+                )
+            tx.execute(
+                "UPDATE device_gateways SET manifest_version=?, manifest_digest=?,"
+                " manifest_json=?, manifest_updated_at=?, endpoint_id=COALESCE(endpoint_id, ?),"
+                " device_id=COALESCE(device_id, ?), device_fingerprint=COALESCE(device_fingerprint, ?)"
+                " WHERE gateway_id=? AND tenant_ref=?",
+                (
+                    str(manifest.get("manifest_version") or ""),
+                    digest,
+                    json.dumps(manifest, sort_keys=True),
+                    iso(),
+                    endpoint_id,
+                    device_id,
+                    fingerprint,
+                    gateway_id,
+                    tenant,
+                ),
+            )
+            _audit(
+                tx,
+                tenant=tenant,
+                actor=actor,
+                actor_type=actor_type,
+                action="gateway.manifest_register",
+                resource_type="device_gateway",
+                resource_id=gateway_id,
+                outcome="allowed",
+                detail={"digest": digest, "version": manifest.get("manifest_version"),
+                        "signed": bool(signature)},
+            )
+            _event(
+                tx,
+                tenant=tenant,
+                event_type="gateway.manifest_registered",
+                aggregate_type="device_gateway",
+                aggregate_id=gateway_id,
+                payload={"gateway_id": gateway_id, "digest": digest,
+                         "manifest_version": manifest.get("manifest_version")},
+            )
+    finally:
+        db.close()
+    return {
+        "gateway_id": gateway_id,
+        "manifest_version": manifest.get("manifest_version"),
+        "digest": digest,
+        "signature": signature,
+    }
+
+
+def get_gateway_manifest(tenant: str, gateway_id: str) -> dict[str, Any] | None:
+    gateway = get_gateway(tenant, gateway_id)
+    if gateway is None:
+        return None
+    return {
+        "gateway_id": gateway_id,
+        "manifest_version": gateway.get("manifest_version"),
+        "digest": gateway.get("manifest_digest"),
+        "manifest": gateway.get("manifest"),
+        "updated_at": gateway.get("manifest_updated_at"),
+    }
+
+
 def heartbeat_gateway(
     *,
     gateway_id: str,
     status: str,
     adapter_inventory: list[dict[str, Any]] | None,
     version: str | None,
+    manifest_digest: str | None = None,
+    manifest_version: str | None = None,
+    endpoint_id: str | None = None,
+    device_id: str | None = None,
+    device_fingerprint: str | None = None,
+    health: dict[str, Any] | None = None,
+    queue_depth: int | None = None,
+    queue_age_seconds: float | None = None,
 ) -> dict[str, Any]:
     if status not in {"online", "degraded", "offline"}:
         raise invalid("invalid_gateway_status")
@@ -763,25 +910,57 @@ def heartbeat_gateway(
             inventory = adapter_inventory if adapter_inventory is not None else _json(
                 row["adapter_inventory_json"], []
             )
+            health_payload = dict(health or {})
+            effective_status = status
+            last_error = None
+            if row["manifest_digest"] and manifest_digest and manifest_digest != row["manifest_digest"]:
+                effective_status = "degraded"
+                last_error = "manifest_digest_mismatch"
+                health_payload["manifest_mismatch"] = True
+            elif row["manifest_digest"] and not manifest_digest:
+                effective_status = "degraded"
+                last_error = "manifest_digest_missing"
+                health_payload["manifest_mismatch"] = True
+            if row["endpoint_id"] and endpoint_id and endpoint_id != row["endpoint_id"]:
+                effective_status = "degraded"
+                last_error = "endpoint_binding_mismatch"
+            if row["device_fingerprint"] and device_fingerprint and device_fingerprint != row["device_fingerprint"]:
+                effective_status = "degraded"
+                last_error = "device_identity_mismatch"
             tx.execute(
                 "UPDATE device_gateways SET status=?, last_heartbeat_at=?,"
-                " adapter_inventory_json=?, last_seen_version=? WHERE gateway_id=?",
-                (status, timestamp, json.dumps(inventory, sort_keys=True), version, gateway_id),
+                " adapter_inventory_json=?, last_seen_version=?, reported_manifest_digest=?,"
+                " health_json=?, queue_depth=?, queue_age_seconds=?, last_error=?"
+                " WHERE gateway_id=?",
+                (
+                    effective_status,
+                    timestamp,
+                    json.dumps(inventory, sort_keys=True),
+                    version,
+                    manifest_digest,
+                    json.dumps(health_payload, sort_keys=True),
+                    queue_depth,
+                    queue_age_seconds,
+                    last_error,
+                    gateway_id,
+                ),
             )
             previous = row["status"]
-            if previous != status:
+            if previous != effective_status:
                 _event(
                     tx,
                     tenant=row["tenant_ref"],
-                    event_type=f"gateway.{status}",
+                    event_type=f"gateway.{effective_status}",
                     aggregate_type="device_gateway",
                     aggregate_id=gateway_id,
-                    payload={"gateway_id": gateway_id, "status": status, "previous": previous},
+                    payload={"gateway_id": gateway_id, "status": effective_status,
+                             "previous": previous, "reason": last_error},
                 )
     finally:
         db.close()
-    return {"gateway_id": gateway_id, "status": status, "observed_at": timestamp,
-            "tenant_ref": row["tenant_ref"]}
+    return {"gateway_id": gateway_id, "status": effective_status, "observed_at": timestamp,
+            "tenant_ref": row["tenant_ref"], "manifest_version": manifest_version,
+            "last_error": last_error}
 
 
 def rotate_gateway_credential(tenant: str, gateway_id: str) -> dict[str, Any]:
@@ -1106,11 +1285,15 @@ def create_approval(
     requester_type: str,
     capability_id: str,
     capability_version: str,
+    operation: str,
     parameters: dict[str, Any],
     intent: str,
     state_hash: str | None,
+    state_version: str | None,
     policy_version: str,
     risk_tier: str,
+    manifest_digest_value: str,
+    require_state: bool = False,
 ) -> dict[str, Any]:
     db = connect()
     try:
@@ -1124,7 +1307,13 @@ def create_approval(
             endpoint = _endpoint(endpoint_row)
             if endpoint["status"] in {"offline", "revoked"}:
                 raise conflict("endpoint_unavailable")
+            if require_state and (not state_hash or not state_version):
+                raise invalid("state_hash_and_version_required")
+            device_id = endpoint.get("device_id")
+            device_fingerprint = endpoint.get("device_fingerprint")
             gateway_id = endpoint.get("gateway_id") or ""
+            if not gateway_id:
+                raise conflict("endpoint_has_no_gateway")
             lease = tx.execute(
                 "SELECT * FROM device_leases WHERE lease_id=? AND tenant_ref=? AND endpoint_id=?"
                 " AND released_at IS NULL AND expires_at>?",
@@ -1132,39 +1321,52 @@ def create_approval(
             ).fetchone()
             if lease is None:
                 raise conflict("active_device_lease_required")
-            if gateway_id:
-                gateway = tx.execute(
-                    "SELECT status FROM device_gateways WHERE gateway_id=? AND tenant_ref=?",
-                    (gateway_id, tenant),
-                ).fetchone()
-                if gateway is None or gateway["status"] not in {"trusted", "online", "degraded"}:
-                    raise conflict("gateway_unavailable")
+            gateway = tx.execute(
+                "SELECT * FROM device_gateways WHERE gateway_id=? AND tenant_ref=?",
+                (gateway_id, tenant),
+            ).fetchone()
+            if gateway is None or gateway["status"] not in {"online", "degraded"}:
+                raise conflict("gateway_unavailable")
+            if gateway["manifest_digest"] != manifest_digest_value:
+                raise conflict("manifest_mismatch")
+            if gateway["device_fingerprint"] and device_fingerprint != gateway["device_fingerprint"]:
+                raise conflict("device_identity_mismatch")
             approval_id = f"apr_{secrets.token_urlsafe(18)}"
+            approval_nonce = secrets.token_urlsafe(24)
             action_digest = approval_binding_digest(
                 tenant_ref=tenant,
                 endpoint_id=endpoint_id,
                 gateway_id=gateway_id,
                 capability_id=capability_id,
                 capability_version=capability_version,
+                operation=operation,
                 parameters=parameters,
                 intent=intent,
                 requester_ref=requester,
                 lease_id=lease_id,
                 policy_version=policy_version,
                 state_hash=state_hash,
+                device_id=device_id,
+                device_fingerprint=device_fingerprint,
+                manifest_digest_value=manifest_digest_value,
+                state_version=state_version,
+                approval_nonce=approval_nonce,
             )
             expires_at = iso(now() + timedelta(seconds=config.approval_ttl_seconds()))
             tx.execute(
                 "INSERT INTO device_approvals (approval_id, tenant_ref, endpoint_id, gateway_id,"
                 " lease_id, requester_ref, requester_type, action_digest, capability_id,"
-                " capability_version, intent, parameters_json, state_hash, policy_version,"
-                " risk_tier, status, expires_at, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                " capability_version, operation, intent, parameters_json, state_hash,"
+                " state_version, policy_version, risk_tier, manifest_digest, approval_nonce,"
+                " device_id, device_fingerprint, status, expires_at, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                " 'pending', ?, ?)",
                 (
                     approval_id, tenant, endpoint_id, gateway_id, lease_id, requester,
-                    requester_type, action_digest, capability_id, capability_version, intent,
-                    json.dumps(parameters, sort_keys=True, separators=(",", ":")), state_hash,
-                    policy_version, risk_tier, expires_at, iso(),
+                    requester_type, action_digest, capability_id, capability_version, operation,
+                    intent, json.dumps(parameters, sort_keys=True, separators=(",", ":")),
+                    state_hash, state_version, policy_version, risk_tier, manifest_digest_value,
+                    approval_nonce, device_id, device_fingerprint, expires_at, iso(),
                 ),
             )
             _audit(
@@ -1176,7 +1378,8 @@ def create_approval(
                 resource_type="device_approval",
                 resource_id=approval_id,
                 outcome="pending",
-                detail={"capability_id": capability_id, "risk_tier": risk_tier},
+                detail={"capability_id": capability_id, "operation": operation,
+                        "risk_tier": risk_tier, "manifest_digest": manifest_digest_value},
             )
             _event(
                 tx,
@@ -1188,8 +1391,10 @@ def create_approval(
                     "approval_id": approval_id,
                     "endpoint_id": endpoint_id,
                     "capability_id": capability_id,
+                    "operation": operation,
                     "risk_tier": risk_tier,
                     "action_digest": action_digest,
+                    "manifest_digest": manifest_digest_value,
                 },
             )
     finally:
@@ -1198,6 +1403,7 @@ def create_approval(
         "approval_id": approval_id,
         "status": "pending",
         "action_sha256": action_digest,
+        "approval_nonce": approval_nonce,
         "expires_at": expires_at,
     }
 
@@ -1295,15 +1501,22 @@ def _binding_matches(approval: dict[str, Any], expected: dict[str, Any]) -> bool
     for key in (
         "tenant_ref",
         "endpoint_id",
+        "device_id",
+        "device_fingerprint",
         "gateway_id",
         "lease_id",
         "capability_id",
         "capability_version",
+        "operation",
+        "manifest_digest",
+        "approval_nonce",
         "action_digest",
     ):
         if str(approval.get(key) or "") != str(expected.get(key) or ""):
             return False
     if (approval.get("state_hash") or None) != (expected.get("state_hash") or None):
+        return False
+    if (approval.get("state_version") or None) != (expected.get("state_version") or None):
         return False
     return True
 
@@ -1451,7 +1664,7 @@ def list_commands(
     db = connect()
     try:
         rows = db.execute(
-            "SELECT * FROM device_commands WHERE " + " AND ".join(clauses)
+            "SELECT * FROM device_commands WHERE " + " AND ".join(clauses)  # nosec B608
             + " ORDER BY created_at DESC LIMIT ?",
             values,
         ).fetchall()
@@ -1466,6 +1679,30 @@ def _capability(capabilities: list[dict[str, Any]], capability_id: str,
         if capability.get("id") == capability_id and capability.get("version") == capability_version:
             return capability
     return None
+
+
+def _manifest_capability(manifest: dict[str, Any] | None, capability_id: str,
+                         capability_version: str) -> dict[str, Any] | None:
+    if not isinstance(manifest, dict):
+        return None
+    return _capability(list(manifest.get("capabilities") or []), capability_id, capability_version)
+
+
+def resolve_manifest_capability(
+    tenant: str, endpoint_id: str, capability_id: str, capability_version: str
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return ``(gateway, manifest capability)`` using trusted control state."""
+
+    endpoint = get_endpoint(tenant, endpoint_id)
+    if endpoint is None or not endpoint.get("gateway_id"):
+        return None
+    gateway = get_gateway(tenant, endpoint["gateway_id"])
+    if gateway is None:
+        return None
+    capability = _manifest_capability(gateway.get("manifest"), capability_id, capability_version)
+    if capability is None:
+        return None
+    return gateway, capability
 
 
 def _advance_tx(
@@ -1546,36 +1783,18 @@ def authorize_command(
     idempotency_key: str,
     lease_id: str,
     approval_id: str | None,
+    approval_nonce: str | None,
     state_hash: str | None,
+    state_version: str | None,
     expected_state: dict[str, Any] | None,
     task_ref: str | None,
     run_ref: str | None,
     correlation_id: str,
-    policy_decision: dict[str, str],
 ) -> dict[str, Any]:
     tenant = principal.require_tenant()
-    payload_hash = command_payload_hash(
-        capability_id=capability_id,
-        capability_version=capability_version,
-        parameters=parameters,
-        intent=intent,
-        deadline=deadline,
-        state_hash=state_hash,
-    )
     db = connect()
     try:
         with transaction(db) as tx:
-            existing = tx.execute(
-                "SELECT * FROM device_commands WHERE tenant_ref=? AND endpoint_id=? AND"
-                " capability_id=? AND idempotency_key=?",
-                (tenant, endpoint_id, capability_id, idempotency_key),
-            ).fetchone()
-            if existing is not None:
-                command = _command(existing)
-                if command["payload_hash"] != payload_hash:
-                    raise conflict("idempotency_conflict")
-                return {"command": command, "deduplicated": True}
-
             endpoint_row = tx.execute(
                 "SELECT * FROM device_endpoints WHERE endpoint_id=? AND tenant_ref=?",
                 (endpoint_id, tenant),
@@ -1586,23 +1805,63 @@ def authorize_command(
             gateway_id = endpoint.get("gateway_id") or ""
             if not gateway_id:
                 raise conflict("endpoint_has_no_gateway")
-            gateway = tx.execute(
+            gateway_row = tx.execute(
                 "SELECT * FROM device_gateways WHERE gateway_id=? AND tenant_ref=?",
                 (gateway_id, tenant),
             ).fetchone()
-            if gateway is None or gateway["status"] not in {"online", "degraded"}:
+            if gateway_row is None or gateway_row["status"] not in {"online", "degraded"}:
                 raise conflict("gateway_not_online")
+            gateway = _gateway(gateway_row)
+            if not gateway.get("manifest_digest") or not gateway.get("manifest"):
+                raise conflict("manifest_missing")
+            if gateway.get("reported_manifest_digest") != gateway["manifest_digest"]:
+                raise conflict("manifest_mismatch")
             if endpoint["status"] not in {"online", "degraded"}:
                 raise conflict("endpoint_unavailable", detail={"status": endpoint["status"]})
 
-            capability = _capability(endpoint["capabilities"], capability_id, capability_version)
+            capability = _manifest_capability(
+                gateway["manifest"], capability_id, capability_version
+            )
             if capability is None:
                 raise conflict("unsupported_capability", detail={
                     "capability_id": capability_id, "capability_version": capability_version,
                 })
+            if _capability(endpoint["capabilities"], capability_id, capability_version) is None:
+                raise conflict("capability_not_observed")
+            operation = str(capability.get("operation") or capability_id)
+            risk_tier = str(capability.get("risk_tier") or "write")
+            requires_state = bool(capability.get("requires_state"))
+            device_id = endpoint.get("device_id")
+            device_fingerprint = endpoint.get("device_fingerprint")
+            if requires_state and (not state_hash or not state_version):
+                raise invalid("state_hash_and_version_required")
+            if gateway.get("device_fingerprint") and device_fingerprint != gateway["device_fingerprint"]:
+                raise conflict("device_identity_mismatch")
             if principal.principal_type == "service" and principal.resource_type == "device_endpoint":
                 if principal.resource_id and principal.resource_id != endpoint_id:
                     raise DeviceControlError(403, "service_token_resource_scope_mismatch")
+
+            payload_hash = command_payload_hash(
+                capability_id=capability_id,
+                capability_version=capability_version,
+                operation=operation,
+                parameters=parameters,
+                intent=intent,
+                deadline=deadline,
+                state_hash=state_hash,
+                state_version=state_version,
+                manifest_digest_value=gateway["manifest_digest"],
+            )
+            existing = tx.execute(
+                "SELECT * FROM device_commands WHERE tenant_ref=? AND endpoint_id=? AND"
+                " capability_id=? AND idempotency_key=?",
+                (tenant, endpoint_id, capability_id, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                command = _command(existing)
+                if command["payload_hash"] != payload_hash:
+                    raise conflict("idempotency_conflict")
+                return {"command": command, "deduplicated": True}
 
             deadline_at = parse_timestamp(deadline)
             if deadline_at <= now():
@@ -1620,20 +1879,33 @@ def authorize_command(
             if lease["holder_ref"] != principal.subject and principal.principal_type != "admin":
                 raise DeviceControlError(403, "lease_holder_mismatch")
 
-            decision = policy_decision.get("decision")
-            if decision == "deny":
+            decision = policy.evaluate(
+                {
+                    "action_type": operation,
+                    "intent": intent,
+                    "app_id": parameters.get("app_id"),
+                    "target_type": parameters.get("target_type"),
+                },
+                lease_mode=lease["mode"],
+                principal_scopes=principal.scopes,
+                risk_tier=risk_tier,
+            )
+            if decision["decision"] == "deny":
                 _audit(
                     tx, tenant=tenant, actor=principal.subject, actor_type=principal.principal_type,
                     action="command.denied", resource_type="device_endpoint", resource_id=endpoint_id,
-                    outcome="denied", detail={"reason": policy_decision.get("reason")},
+                    outcome="denied", detail={"reason": decision.get("reason"),
+                                              "operation": operation},
                     correlation_id=correlation_id,
                 )
                 raise DeviceControlError(403, "policy_denied", detail={
-                    "reason": policy_decision.get("reason"),
+                    "reason": decision.get("reason"),
                 })
-            if decision == "ask":
+            if decision["decision"] == "ask":
                 if not approval_id:
                     raise conflict("approval_required")
+                if not approval_nonce:
+                    raise invalid("approval_nonce_required")
             elif approval_id:
                 raise invalid("approval_not_required")
 
@@ -1643,19 +1915,20 @@ def authorize_command(
             tx.execute(
                 "INSERT INTO device_commands (command_id, tenant_ref, endpoint_id, gateway_id,"
                 " task_ref, run_ref, correlation_id, capability_id, capability_version,"
-                " parameters_json, parameters_digest, intent, risk_tier, deadline,"
-                " idempotency_key, payload_hash, lease_id, approval_id, policy_version,"
-                " policy_decision, state_hash, expected_state_json, status, status_reason,"
+                " operation, parameters_json, parameters_digest, intent, risk_tier, deadline,"
+                " idempotency_key, payload_hash, lease_id, approval_id, approval_nonce,"
+                " policy_version, policy_decision, state_hash, state_version, manifest_digest,"
+                " device_id, device_fingerprint, expected_state_json, status, status_reason,"
                 " submitted_by, submitter_type, created_at, updated_at, evidence_refs_json)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                " 'created', NULL, ?, ?, ?, ?, '[]')",
+                " ?, ?, ?, ?, ?, ?, 'created', NULL, ?, ?, ?, ?, '[]')",
                 (
                     command_id, tenant, endpoint_id, gateway_id, task_ref, run_ref,
-                    correlation_id, capability_id, capability_version, parameters_json,
-                    digest_object(parameters), intent,
-                    str(capability.get("risk_tier") or "write"), deadline, idempotency_key,
-                    payload_hash, lease_id, approval_id, policy_decision.get("policy_version", ""),
-                    decision, state_hash,
+                    correlation_id, capability_id, capability_version, operation,
+                    parameters_json, digest_object(parameters), intent, risk_tier, deadline,
+                    idempotency_key, payload_hash, lease_id, approval_id, approval_nonce,
+                    decision.get("policy_version", ""), decision["decision"], state_hash,
+                    state_version, gateway["manifest_digest"], device_id, device_fingerprint,
                     json.dumps(expected_state, sort_keys=True) if expected_state else None,
                     principal.subject, principal.principal_type, timestamp, timestamp,
                 ),
@@ -1673,26 +1946,38 @@ def authorize_command(
                 actor=principal.subject, actor_type=principal.principal_type,
                 event_type="command.queued",
             )
-            if decision == "ask":
+            if decision["decision"] == "ask":
                 expected_binding = {
                     "tenant_ref": tenant,
                     "endpoint_id": endpoint_id,
+                    "device_id": device_id,
+                    "device_fingerprint": device_fingerprint,
                     "gateway_id": gateway_id,
                     "lease_id": lease_id,
                     "capability_id": capability_id,
                     "capability_version": capability_version,
+                    "operation": operation,
+                    "manifest_digest": gateway["manifest_digest"],
+                    "approval_nonce": approval_nonce,
+                    "state_version": state_version,
                     "action_digest": approval_binding_digest(
                         tenant_ref=tenant,
                         endpoint_id=endpoint_id,
                         gateway_id=gateway_id,
                         capability_id=capability_id,
                         capability_version=capability_version,
+                        operation=operation,
                         parameters=parameters,
                         intent=intent,
                         requester_ref=principal.subject,
                         lease_id=lease_id,
-                        policy_version=policy_decision.get("policy_version", ""),
+                        policy_version=decision.get("policy_version", ""),
                         state_hash=state_hash,
+                        device_id=device_id,
+                        device_fingerprint=device_fingerprint,
+                        manifest_digest_value=gateway["manifest_digest"],
+                        state_version=state_version,
+                        approval_nonce=approval_nonce or "",
                     ),
                     "state_hash": state_hash,
                 }
@@ -1709,8 +1994,9 @@ def authorize_command(
                 tx, tenant=tenant, actor=principal.subject, actor_type=principal.principal_type,
                 action="command.submit", resource_type="device_command", resource_id=command_id,
                 outcome="allowed",
-                detail={"capability_id": capability_id, "decision": decision,
-                        "approval_id": approval_id},
+                detail={"capability_id": capability_id, "operation": operation,
+                        "decision": decision["decision"], "approval_id": approval_id,
+                        "manifest_digest": gateway["manifest_digest"]},
                 correlation_id=correlation_id,
             )
             command = _command(tx.execute(
@@ -1727,13 +2013,20 @@ def dispatch_commands(tenant: str, gateway_id: str, *, limit: int = 10) -> list[
     try:
         with transaction(db) as tx:
             gateway = tx.execute(
-                "SELECT status FROM device_gateways WHERE gateway_id=? AND tenant_ref=?",
+                "SELECT * FROM device_gateways WHERE gateway_id=? AND tenant_ref=?",
                 (gateway_id, tenant),
             ).fetchone()
             if gateway is None:
                 raise hidden()
             if gateway["status"] not in {"online", "degraded"}:
                 raise conflict("gateway_not_online")
+            if not gateway["manifest_digest"]:
+                raise conflict("manifest_missing")
+            if gateway["reported_manifest_digest"] != gateway["manifest_digest"]:
+                raise conflict("manifest_mismatch", detail={
+                    "expected": gateway["manifest_digest"],
+                    "reported": gateway["reported_manifest_digest"],
+                })
             timestamp = iso()
             expired = tx.execute(
                 "SELECT * FROM device_commands WHERE gateway_id=? AND tenant_ref=?"
@@ -1859,7 +2152,10 @@ def record_command_result(
 
             effective_status = status
             effective_reason = reason
-            if status == "succeeded" and not command_rules.verification_is_sufficient(verification):
+            if status == "executed_unverified":
+                effective_status = "uncertain"
+                effective_reason = reason or "executed_unverified"
+            elif status == "succeeded" and not command_rules.verification_is_sufficient(verification):
                 effective_status = "uncertain"
                 effective_reason = "verification_insufficient"
 
@@ -1959,6 +2255,223 @@ def command_transitions(tenant: str, command_id: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def operation_alerts(tenant: str) -> list[dict[str, Any]]:
+    """Tenant-scoped operational alerts computed from authoritative state."""
+
+    alerts: list[dict[str, Any]] = []
+    db = connect()
+    try:
+        gateways = db.execute(
+            "SELECT gateway_id, status, last_heartbeat_at, last_error, queue_depth"
+            " FROM device_gateways WHERE tenant_ref=? AND status!='revoked'",
+            (tenant,),
+        ).fetchall()
+        for gateway in gateways:
+            if gateway["status"] in {"offline", "degraded"}:
+                alerts.append({
+                    "severity": "warning" if gateway["status"] == "degraded" else "critical",
+                    "code": f"gateway_{gateway['status']}",
+                    "resource_type": "device_gateway",
+                    "resource_id": gateway["gateway_id"],
+                    "detail": {"last_error": gateway["last_error"],
+                               "queue_depth": gateway["queue_depth"]},
+                })
+            if gateway["last_heartbeat_at"]:
+                age = (now() - parse_timestamp(gateway["last_heartbeat_at"])).total_seconds()
+                if age > config.stale_after_seconds():
+                    alerts.append({
+                        "severity": "critical",
+                        "code": "gateway_heartbeat_stale",
+                        "resource_type": "device_gateway",
+                        "resource_id": gateway["gateway_id"],
+                        "detail": {"heartbeat_age_seconds": age},
+                    })
+        uncertain = db.execute(
+            "SELECT COUNT(*) AS count FROM device_commands WHERE tenant_ref=?"
+            " AND status='uncertain' AND updated_at>=?",
+            (tenant, iso(now() - timedelta(hours=24))),
+        ).fetchone()
+        if uncertain and uncertain["count"]:
+            alerts.append({
+                "severity": "warning",
+                "code": "uncertain_commands",
+                "resource_type": "device_command",
+                "resource_id": None,
+                "detail": {"count": uncertain["count"], "window_hours": 24},
+            })
+    finally:
+        db.close()
+    return alerts
+
+
+# ---------------------------------------------------------------------------
+# Evidence metadata
+# ---------------------------------------------------------------------------
+
+
+def _evidence(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    return dict(row)
+
+
+def create_evidence(
+    *,
+    tenant: str,
+    gateway_id: str,
+    endpoint_id: str,
+    command_id: str,
+    evidence_id: str,
+    storage_ref: str,
+    evidence_type: str,
+    mime_type: str,
+    content_sha256: str,
+    size_bytes: int,
+    captured_at: str,
+    redaction_status: str,
+    retention_until: str,
+    device_id: str | None = None,
+    task_ref: str | None = None,
+    run_ref: str | None = None,
+    correlation_id: str | None = None,
+) -> dict[str, Any]:
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            command = tx.execute(
+                "SELECT * FROM device_commands WHERE command_id=? AND tenant_ref=?",
+                (command_id, tenant),
+            ).fetchone()
+            if command is None:
+                raise hidden()
+            if command["gateway_id"] != gateway_id or command["endpoint_id"] != endpoint_id:
+                raise hidden()
+            tx.execute(
+                "INSERT INTO device_evidence (evidence_id, tenant_ref, gateway_id, endpoint_id,"
+                " device_id, command_id, task_ref, run_ref, correlation_id, evidence_type,"
+                " mime_type, content_sha256, size_bytes, captured_at, redaction_status,"
+                " retention_until, storage_ref, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    evidence_id, tenant, gateway_id, endpoint_id, device_id, command_id,
+                    task_ref, run_ref, correlation_id, evidence_type, mime_type,
+                    content_sha256, size_bytes, captured_at, redaction_status,
+                    retention_until, storage_ref, iso(),
+                ),
+            )
+            _audit(
+                tx, tenant=tenant, actor=gateway_id, actor_type="gateway",
+                action="evidence.create", resource_type="device_evidence",
+                resource_id=evidence_id, outcome="allowed",
+                detail={"command_id": command_id, "type": evidence_type, "size": size_bytes},
+                correlation_id=correlation_id,
+            )
+            _event(
+                tx, tenant=tenant, event_type="evidence.created",
+                aggregate_type="device_command", aggregate_id=command_id,
+                payload={"evidence_id": evidence_id, "type": evidence_type,
+                         "content_sha256": content_sha256},
+                task_ref=task_ref, run_ref=run_ref, correlation_id=correlation_id,
+            )
+    finally:
+        db.close()
+    return get_evidence(tenant, evidence_id) or {}
+
+
+def get_evidence(tenant: str, evidence_id: str) -> dict[str, Any] | None:
+    db = connect()
+    try:
+        row = db.execute(
+            "SELECT * FROM device_evidence WHERE evidence_id=? AND tenant_ref=?",
+            (evidence_id, tenant),
+        ).fetchone()
+    finally:
+        db.close()
+    return _evidence(row) if row else None
+
+
+def list_evidence(tenant: str, command_id: str) -> list[dict[str, Any]]:
+    db = connect()
+    try:
+        rows = db.execute(
+            "SELECT * FROM device_evidence WHERE tenant_ref=? AND command_id=?"
+            " AND deleted_at IS NULL ORDER BY created_at",
+            (tenant, command_id),
+        ).fetchall()
+    finally:
+        db.close()
+    return [_evidence(row) for row in rows]
+
+
+def mark_evidence_deleted(tenant: str, evidence_id: str, *, actor: str,
+                          actor_type: str) -> dict[str, Any] | None:
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            row = tx.execute(
+                "SELECT * FROM device_evidence WHERE evidence_id=? AND tenant_ref=?"
+                " AND deleted_at IS NULL",
+                (evidence_id, tenant),
+            ).fetchone()
+            if row is None:
+                return None
+            tx.execute(
+                "UPDATE device_evidence SET deleted_at=? WHERE evidence_id=?",
+                (iso(), evidence_id),
+            )
+            _audit(
+                tx, tenant=tenant, actor=actor, actor_type=actor_type,
+                action="evidence.delete", resource_type="device_evidence",
+                resource_id=evidence_id, outcome="allowed",
+            )
+            return _evidence(row)
+    finally:
+        db.close()
+
+
+def expired_evidence(limit: int = 100) -> list[dict[str, Any]]:
+    db = connect()
+    try:
+        rows = db.execute(
+            "SELECT * FROM device_evidence WHERE deleted_at IS NULL AND retention_until IS NOT NULL"
+            " AND retention_until<=? ORDER BY retention_until LIMIT ?",
+            (iso(), limit),
+        ).fetchall()
+    finally:
+        db.close()
+    return [_evidence(row) for row in rows]
+
+
+def record_evidence_access(tenant: str, evidence_id: str, *, actor: str,
+                           actor_type: str) -> None:
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            _audit(
+                tx, tenant=tenant, actor=actor, actor_type=actor_type,
+                action="evidence.access", resource_type="device_evidence",
+                resource_id=evidence_id, outcome="allowed",
+            )
+    finally:
+        db.close()
+
+
+def purge_evidence_record(tenant: str, evidence_id: str) -> None:
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            tx.execute(
+                "UPDATE device_evidence SET deleted_at=? WHERE evidence_id=? AND tenant_ref=?"
+                " AND deleted_at IS NULL",
+                (iso(), evidence_id, tenant),
+            )
+            _audit(
+                tx, tenant=tenant, actor="system", actor_type="system",
+                action="evidence.retention_delete", resource_type="device_evidence",
+                resource_id=evidence_id, outcome="allowed",
+            )
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # Events, audit, maintenance
 # ---------------------------------------------------------------------------
@@ -1984,7 +2497,7 @@ def list_events(
     db = connect()
     try:
         rows = db.execute(
-            "SELECT * FROM command_events WHERE " + " AND ".join(clauses)
+            "SELECT * FROM command_events WHERE " + " AND ".join(clauses)  # nosec B608
             + " ORDER BY occurred_at, event_id LIMIT ?",
             values,
         ).fetchall()
@@ -2006,7 +2519,7 @@ def ack_events(tenant: str, event_ids: list[str]) -> int:
     try:
         with transaction(db) as tx:
             cursor = tx.execute(
-                f"UPDATE command_events SET published_at=COALESCE(published_at, ?)"
+                f"UPDATE command_events SET published_at=COALESCE(published_at, ?)"  # nosec B608
                 f" WHERE tenant_ref=? AND event_id IN ({placeholders})",
                 (iso(), tenant, *event_ids),
             )
@@ -2027,7 +2540,7 @@ def list_audit(
     db = connect()
     try:
         rows = db.execute(
-            "SELECT * FROM audit_records WHERE " + " AND ".join(clauses)
+            "SELECT * FROM audit_records WHERE " + " AND ".join(clauses)  # nosec B608
             + " ORDER BY audit_id DESC LIMIT ?",
             values,
         ).fetchall()

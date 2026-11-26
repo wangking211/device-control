@@ -22,7 +22,7 @@ ASK_ACTIONS = {
     "delete", "install", "uninstall", "call", "security_settings", "external_link",
 }
 READ_ACTIONS = {"observe", "read", "search", "navigate", "wait_for", "read_list", "screenshot", "foreground_app"}
-LOW_RISK_ACTIONS = {"launch", "tap", "type", "type_text", "back", "home", "wait_and_verify"}
+LOW_RISK_ACTIONS: set[str] = set()
 DESTRUCTIVE_ACTIONS = {"factory_reset", "wipe", "uninstall", "revoke_certificate", "change_lock"}
 SECRET_TARGETS = {"password", "otp", "secret", "credential", "card_number", "cvv"}
 
@@ -58,6 +58,8 @@ def evaluate(
         return _deny("r3_safety_critical_default_deny")
     if risk_tier == "destructive":
         return _deny("destructive_capability_not_available_to_general_agents")
+    if risk_tier == "read":
+        return _allow("manifest_read_only_capability")
     if lease_mode == "read_only" and action_type not in READ_ACTIONS:
         return _deny("read_only_lease")
     if action_type in READ_ACTIONS or action_type in LOW_RISK_ACTIONS:

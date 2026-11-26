@@ -23,6 +23,7 @@ monorepo path dependency.
 | `gateway-command.schema.json` | bounded gateway command envelope |
 | `gateway-command-result.schema.json` | execution result/verification |
 | `device-event.schema.json` | transactional outbox envelope |
+| `device-manifest.schema.json` | trusted capability/risk/verification manifest |
 
 ## Rules
 

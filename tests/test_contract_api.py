@@ -4,7 +4,6 @@ from support import (
     agent_token,
     approver_token,
     bearer,
-    capability,
     command_body,
     configure,
     setup_stack,
@@ -104,28 +103,25 @@ def test_policy_requires_active_lease_and_applies_safe_defaults(tmp_path, monkey
 
 def test_approval_is_bound_to_exact_action_and_single_use(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
-    capabilities = [
-        capability("app.launch", risk_tier="read"),
-        capability("ui.send", risk_tier="write",
-                   input_schema={"type": "object", "required": ["text"],
-                                 "properties": {"text": {"type": "string"}},
-                                 "additionalProperties": True}),
-    ]
-    stack = setup_stack(client, capabilities=capabilities)
+    stack = setup_stack(client)
     agent = agent_token()
     lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"])
     request = client.post("/v1/approvals", json={
         "endpoint_id": stack["endpoint_id"], "lease_id": lease["lease_id"],
-        "capability_id": "ui.send", "capability_version": "1.0.0",
-        "input": {"text": "hello"}, "intent": "Send a message",
-        "action_type": "send", "state_hash": "state-1",
+        "capability_id": "ui.type_text", "capability_version": "1.0.0",
+        "input": {"target_ref": "field-search", "text": "hello"},
+        "intent": "Type into search", "state_hash": "state-1",
+        "state_version": "v1:state-1",
     }, headers=bearer(agent))
     assert request.status_code == 201, request.text
     approval_id = request.json()["approval_id"]
+    approval_nonce = request.json()["approval_nonce"]
     request2 = client.post("/v1/approvals", json={
         "endpoint_id": stack["endpoint_id"], "lease_id": lease["lease_id"],
-        "capability_id": "ui.send", "capability_version": "1.0.0",
-        "input": {"text": "again"}, "intent": "Send a message", "action_type": "send",
+        "capability_id": "ui.type_text", "capability_version": "1.0.0",
+        "input": {"target_ref": "field-search", "text": "again"},
+        "intent": "Type into search", "state_hash": "state-1",
+        "state_version": "v1:state-1",
     }, headers=bearer(agent))
     assert request2.status_code == 201
     assert client.post(f"/v1/approvals/{request2.json()['approval_id']}/decision",
@@ -136,9 +132,11 @@ def test_approval_is_bound_to_exact_action_and_single_use(tmp_path, monkeypatch)
     assert decided.status_code == 200, decided.text
 
     body = command_body(endpoint_id=stack["endpoint_id"], lease_id=lease["lease_id"],
-                        idempotency_key="send-1", capability_id="ui.send",
-                        input_payload={"text": "hello"}, state_hash="state-1",
-                        approval_id=approval_id, intent="Send a message")
+                        idempotency_key="send-1", capability_id="ui.type_text",
+                        input_payload={"target_ref": "field-search", "text": "hello"},
+                        state_hash="state-1", state_version="v1:state-1",
+                        approval_id=approval_id, approval_nonce=approval_nonce,
+                        intent="Type into search")
     submitted = client.post("/v1/commands", json=body, headers=bearer(agent))
     assert submitted.status_code == 201, submitted.text
     command_id = submitted.json()["command_id"]

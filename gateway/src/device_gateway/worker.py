@@ -16,9 +16,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from . import manifest
+from . import manifest as manifest_rules
 from .adapters.base import ActionResult, AdapterError, AdapterTimeout, DeviceAdapter
 from .control_client import ControlPlaneClient, ControlPlaneError
+from .isolation import DirectRunner, Runner
 from .ledger import CONFLICT, DUPLICATE, DedupeLedger
 from .preflight import Context, Rejected, revalidate
 from .queue import BackpressureError, BoundedQueue
@@ -39,6 +40,7 @@ class WorkerState:
     paused_reason: str | None = None
     last_heartbeat: float = 0.0
     reported: list[str] = field(default_factory=list)
+    last_error: str | None = None
 
 
 class GatewayWorker:
@@ -50,15 +52,27 @@ class GatewayWorker:
         ledger: DedupeLedger,
         queue: BoundedQueue,
         tenant_ref: str,
+        endpoint_id: str = "",
+        device_id: str = "",
+        device_fingerprint: str = "",
+        manifest_document: dict[str, Any] | None = None,
+        state_max_age_seconds: float = 15.0,
+        runner: Runner | None = None,
         config: WorkerConfig | None = None,
         clock: Callable[[], float] = time.monotonic,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.client = client
         self.adapter = adapter
+        self.runner = runner or DirectRunner(adapter)
         self.ledger = ledger
         self.queue = queue
         self.tenant_ref = tenant_ref
+        self.endpoint_id = endpoint_id
+        self.device_id = device_id
+        self.device_fingerprint = device_fingerprint
+        self.manifest = manifest_document or manifest_rules.default_document()
+        self.state_max_age_seconds = state_max_age_seconds
         self.config = config or WorkerConfig()
         self.clock = clock
         self.on_event = on_event
@@ -115,13 +129,21 @@ class GatewayWorker:
             status = "degraded"
         response = self.client.heartbeat(
             status=status,
-            adapter_inventory=manifest.inventory(
-                getattr(self.adapter, "adapter_id", "unknown"),
-                getattr(self.adapter, "version", "0.0.0"),
+            adapter_inventory=manifest_rules.inventory(
+                self.runner.adapter_id,
+                self.runner.version,
                 health,
+                manifest=self.manifest,
             ),
             agent_version=self.config.agent_version,
             health=health,
+            manifest_digest=manifest_rules.digest(self.manifest),
+            manifest_version=str(self.manifest.get("manifest_version") or ""),
+            endpoint_id=self.endpoint_id,
+            device_id=self.device_id,
+            device_fingerprint=self.device_fingerprint or health.get("device_fingerprint"),
+            queue_depth=len(self.queue),
+            queue_age_seconds=self.queue.age_seconds(),
         )
         tenant = response.get("tenant_ref")
         if isinstance(tenant, str) and tenant:
@@ -148,8 +170,10 @@ class GatewayWorker:
                 continue
             if claim.outcome == DUPLICATE:
                 if claim.status in {"claimed", "executing"}:
-                    capability = manifest.capability(
-                        str(command.get("capability_id")), str(command.get("capability_version"))
+                    capability = manifest_rules.capability(
+                        self.manifest,
+                        str(command.get("capability_id")),
+                        str(command.get("capability_version")),
                     )
                     if not (capability or {}).get("supports_idempotency"):
                         self._report(
@@ -192,14 +216,21 @@ class GatewayWorker:
             return False
 
         try:
-            observed = self.adapter.observe_state()
+            observed = self.runner.observe_state()
+            fingerprint = observed.get("device_fingerprint") or self.device_fingerprint
             revalidate(command, Context(
                 tenant_ref=self.tenant_ref,
                 gateway_id=self.client.gateway_id,
+                endpoint_id=self.endpoint_id,
                 now=datetime.now(timezone.utc),
                 observed_state_hash=observed.get("state_hash"),
-                allowed_apps=frozenset(getattr(self.adapter, "allowed_apps", frozenset())),
-            ))
+                observed_state_version=observed.get("state_version"),
+                observed_at=observed.get("observed_at"),
+                device_id=self.device_id,
+                device_fingerprint=fingerprint,
+                allowed_apps=frozenset(getattr(self.runner, "allowed_apps", frozenset())),
+                nodes=tuple(observed.get("nodes") or ()),
+            ), self.manifest)
         except Rejected as exc:
             self._report(command, status="rejected", reason=f"{exc.code}: {exc.reason}",
                          error_class=exc.error_class)
@@ -216,6 +247,14 @@ class GatewayWorker:
         self._emit("gateway.executing", {"command_id": command_id,
                                          "capability_id": command.get("capability_id")})
         result = self._execute(command)
+        artifact = result.pop("artifact_bytes", None)
+        if artifact:
+            uploaded = self._upload_evidence(command, artifact)
+            if uploaded:
+                result["evidence_refs"] = [*result.get("evidence_refs", []), uploaded]
+            elif result["status"] == "succeeded":
+                result["status"] = "executed_unverified"
+                result["reason"] = "evidence_upload_failed"
         posted = self._report(command, **result)
         status = result["status"]
         if posted:
@@ -226,33 +265,35 @@ class GatewayWorker:
         return True
 
     def _execute(self, command: dict[str, Any]) -> dict[str, Any]:
-        capability = manifest.capability(
+        capability = manifest_rules.capability(
+            self.manifest,
             str(command["capability_id"]), str(command["capability_version"])
         )
-        timeout_ms = int((capability or {}).get("max_timeout_ms") or 15000)
+        timeout_ms = int((capability or {}).get("timeout_ms") or 15000)
         started = time.monotonic()
         try:
-            outcome: ActionResult = self.adapter.execute(
-                str(command["capability_id"]), dict(command.get("parameters") or {})
+            outcome: ActionResult = self.runner.execute(
+                str(command["capability_id"]), dict(command.get("parameters") or {}),
+                max(0.1, timeout_ms / 1000),
             )
         except AdapterTimeout as exc:
-            return {"status": "uncertain", "reason": str(exc), "error_class": "timeout"}
+            return {"status": "uncertain", "reason": str(exc), "error_class": "timeout",
+                    "executed": True}
         except AdapterError as exc:
             return {"status": "uncertain" if exc.uncertain else "failed",
                     "reason": str(exc), "error_class": exc.error_class,
-                    "retryable": exc.retryable}
+                    "retryable": exc.retryable, "executed": exc.uncertain}
         except Exception as exc:  # noqa: BLE001 - adapter crash isolation
             return {"status": "uncertain", "reason": f"adapter_crash:{type(exc).__name__}",
-                    "error_class": "adapter"}
+                    "error_class": "adapter", "executed": True}
         elapsed_ms = int((time.monotonic() - started) * 1000)
         if elapsed_ms > timeout_ms:
             return {"status": "uncertain", "reason": "adapter_overran_timeout",
-                    "error_class": "timeout"}
+                    "error_class": "timeout", "executed": True}
         status = outcome.status
         verification = outcome.verification
         if status == "succeeded" and not self._verification_ok(verification):
-            # Never claim success without evidence.
-            status = "uncertain"
+            status = "executed_unverified" if outcome.executed else "uncertain"
             outcome.reason = outcome.reason or "verification_insufficient"
         return {
             "status": status,
@@ -262,9 +303,31 @@ class GatewayWorker:
             "output": outcome.output,
             "verification": verification,
             "evidence_refs": outcome.evidence_refs,
+            "executed": outcome.executed,
+            "artifact_bytes": outcome.artifact_bytes,
         }
 
     # -- reporting ------------------------------------------------------
+
+    def _upload_evidence(self, command: dict[str, Any], data: bytes) -> str | None:
+        capability_id = str(command.get("capability_id") or "")
+        if capability_id == "device.screenshot":
+            evidence_type, mime_type = "screenshot", "image/png"
+        else:
+            evidence_type, mime_type = "node_summary", "application/json"
+        try:
+            metadata = self.client.upload_evidence(
+                str(command["command_id"]), data,
+                evidence_type=evidence_type, mime_type=mime_type,
+                redaction_status="redacted",
+                captured_at=datetime.now(timezone.utc).isoformat(),
+            )
+            return str(metadata.get("evidence_id") or "") or None
+        except ControlPlaneError as exc:
+            self._emit("gateway.evidence_upload_failed", {
+                "command_id": command["command_id"], "code": exc.code,
+            })
+            return None
 
     def flush_pending_results(self) -> int:
         flushed = 0
@@ -311,7 +374,7 @@ class GatewayWorker:
 
     def _safe_health(self) -> dict[str, Any]:
         try:
-            return dict(self.adapter.health())
+            return dict(self.runner.health())
         except Exception as exc:  # noqa: BLE001 - health must not crash the loop
             return {"status": "error", "reason": type(exc).__name__}
 
@@ -332,12 +395,14 @@ class GatewayWorker:
                         error_class: str | None = None, retryable: bool = False,
                         output: dict[str, Any] | None = None,
                         verification: dict[str, Any] | None = None,
-                        evidence_refs: list[str] | None = None) -> dict[str, Any]:
+                        evidence_refs: list[str] | None = None,
+                        executed: bool = False) -> dict[str, Any]:
         return {
             "status": status,
             "reason": reason,
             "error_class": error_class,
             "retryable": bool(retryable),
+            "executed": bool(executed),
             "output": output or {},
             "verification": verification,
             "evidence_refs": (evidence_refs or [])[:20],
@@ -349,5 +414,5 @@ class GatewayWorker:
         if self.on_event is not None:
             try:
                 self.on_event(event, payload)
-            except Exception:  # noqa: BLE001 - observers must not break the worker
-                pass
+            except Exception as exc:  # noqa: BLE001 - observers must not break the worker
+                self.state.last_error = type(exc).__name__
