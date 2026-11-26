@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import hmac
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from jsonschema import Draft202012Validator, FormatChecker
+
+from device_control import store
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_DIR = ROOT / "contracts" / "v1"
@@ -83,3 +87,59 @@ def validate(name: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="contract_not_found")
     errors = validate_contract(name, payload)
     return {"valid": not errors, "errors": errors, "contract_version": "v1"}
+
+
+def require_admin(authorization: str | None) -> None:
+    expected = os.environ.get("DEVICE_CONTROL_ADMIN_TOKEN", "")
+    if not expected or not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=503 if not expected else 401, detail="admin_auth_not_configured" if not expected else "unauthorized")
+    if not hmac.compare_digest(authorization[7:], expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+def endpoint_credential(endpoint_id: str, authorization: str | None) -> None:
+    if not authorization or not authorization.startswith("Bearer ") or not store.authenticate(endpoint_id, authorization[7:]):
+        raise HTTPException(status_code=401, detail="endpoint_unauthorized")
+
+
+@app.post("/v1/endpoints", tags=["endpoints"], status_code=201)
+def enroll_endpoint(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    require_admin(authorization)
+    errors = validate_contract("endpoint", {**payload, "status": "offline", "observed_at": datetime.now(timezone.utc).isoformat()})
+    if errors:
+        raise HTTPException(status_code=422, detail={"code": "invalid_endpoint", "errors": errors})
+    try:
+        credential = store.enroll(endpoint_id=payload["endpoint_id"], tenant_ref=payload["tenant_ref"],
+                                  node_ref=payload.get("node_ref"), capabilities=payload["capabilities"],
+                                  observed_at=datetime.now(timezone.utc).isoformat())
+    except Exception as exc:
+        if "UNIQUE" in str(exc).upper():
+            raise HTTPException(status_code=409, detail="endpoint_already_exists") from exc
+        raise
+    return {"endpoint_id": payload["endpoint_id"], "credential": credential, "status": "offline"}
+
+
+@app.get("/v1/endpoints", tags=["endpoints"])
+def endpoints(tenant_ref: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    require_admin(authorization)
+    return {"items": store.list_endpoints(tenant_ref)}
+
+
+@app.post("/v1/endpoints/{endpoint_id}/heartbeat", tags=["endpoints"])
+def endpoint_heartbeat(endpoint_id: str, payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, str]:
+    endpoint_credential(endpoint_id, authorization)
+    payload = {**payload, "endpoint_id": endpoint_id, "tenant_ref": store.get_endpoint(endpoint_id)["tenant_ref"],
+               "protocol_version": "v1", "observed_at": datetime.now(timezone.utc).isoformat()}
+    errors = validate_contract("endpoint", payload)
+    if errors:
+        raise HTTPException(status_code=422, detail={"code": "invalid_endpoint", "errors": errors})
+    store.heartbeat(endpoint_id, status=payload["status"], capabilities=payload["capabilities"], observed_at=payload["observed_at"])
+    return {"endpoint_id": endpoint_id, "status": "accepted"}
+
+
+@app.delete("/v1/endpoints/{endpoint_id}", tags=["endpoints"])
+def revoke_endpoint(endpoint_id: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    require_admin(authorization)
+    if not store.revoke(endpoint_id):
+        raise HTTPException(status_code=404, detail="endpoint_not_found")
+    return {"endpoint_id": endpoint_id, "status": "revoked"}

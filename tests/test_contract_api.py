@@ -27,3 +27,27 @@ def test_valid_invocation_shape():
         "idempotency_key": "idem-1", "input": {}, "intent": "Observe current screen"
     }
     assert client.post("/v1/contracts/invocation/validate", json=payload).json()["valid"] is True
+
+
+def test_endpoint_enrollment_heartbeat_list_and_revoke(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEVICE_CONTROL_ADMIN_TOKEN", "test-admin-token")
+    monkeypatch.setenv("DEVICE_CONTROL_DB", str(tmp_path / "device-control.sqlite3"))
+    admin = {"Authorization": "Bearer test-admin-token"}
+    payload = {
+        "endpoint_id": "phone-1", "tenant_ref": "tenant-a", "node_ref": "node-1",
+        "protocol_version": "v1", "capabilities": []
+    }
+    assert client.post("/v1/endpoints", json=payload).status_code == 401
+    created = client.post("/v1/endpoints", json=payload, headers=admin)
+    assert created.status_code == 201
+    credential = created.json()["credential"]
+    assert credential
+    assert "credential" not in client.get("/v1/endpoints?tenant_ref=tenant-a", headers=admin).text
+
+    heartbeat = client.post("/v1/endpoints/phone-1/heartbeat", json={"status": "online", "capabilities": []},
+                            headers={"Authorization": f"Bearer {credential}"})
+    assert heartbeat.status_code == 200
+    assert client.get("/v1/endpoints?tenant_ref=tenant-a", headers=admin).json()["items"][0]["status"] == "online"
+    assert client.delete("/v1/endpoints/phone-1", headers=admin).json()["status"] == "revoked"
+    assert client.post("/v1/endpoints/phone-1/heartbeat", json={"status": "online", "capabilities": []},
+                       headers={"Authorization": f"Bearer {credential}"}).status_code == 401
