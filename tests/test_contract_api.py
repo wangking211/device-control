@@ -8,7 +8,7 @@ client = TestClient(app)
 def test_health_and_contract_catalog():
     assert client.get("/health/live").json() == {"status": "live"}
     assert client.get("/health/ready").status_code == 200
-    assert len(client.get("/v1/contracts").json()["contracts"]) == 3
+    assert len(client.get("/v1/contracts").json()["contracts"]) == 6
 
 
 def test_contract_validation_reports_errors_without_accepting_unknown_contract():

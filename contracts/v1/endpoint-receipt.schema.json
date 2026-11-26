@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/endpoint-receipt.v1.schema.json",
+  "title": "Device Endpoint Enrollment Receipt",
+  "description": "Enrollment secret is returned exactly once and must never be logged or persisted in plaintext by the service.",
+  "type": "object",
+  "required": ["endpoint_id", "credential", "status"],
+  "properties": {
+    "endpoint_id": {"type": "string", "minLength": 1},
+    "credential": {"type": "string", "minLength": 32, "writeOnly": true},
+    "status": {"const": "offline"}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/endpoint-enrollment.v1.schema.json",
+  "title": "Device Endpoint Enrollment Request",
+  "type": "object",
+  "required": ["endpoint_id", "tenant_ref", "protocol_version", "capabilities"],
+  "properties": {
+    "endpoint_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "tenant_ref": {"type": "string", "minLength": 1, "maxLength": 200},
+    "node_ref": {"type": ["string", "null"], "maxLength": 200},
+    "protocol_version": {"const": "v1"},
+    "capabilities": {"type": "array", "items": {"$ref": "device-endpoint.schema.json#/$defs/capability"}},
+    "metadata": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}

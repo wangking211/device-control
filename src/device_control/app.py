@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException
-from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema import Draft202012Validator, FormatChecker, RefResolver
 
 from device_control import store
 
@@ -16,6 +16,9 @@ ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_DIR = ROOT / "contracts" / "v1"
 SCHEMAS = {
     "endpoint": "device-endpoint.schema.json",
+    "enrollment": "endpoint-enrollment.schema.json",
+    "heartbeat": "endpoint-heartbeat.schema.json",
+    "enrollment_receipt": "endpoint-receipt.schema.json",
     "invocation": "device-invocation.schema.json",
     "result": "device-result.schema.json",
 }
@@ -30,8 +33,14 @@ def load_schema(name: str) -> dict[str, Any]:
 
 def validate_contract(name: str, payload: dict[str, Any]) -> list[dict[str, str]]:
     schema = load_schema(name)
+    store_schemas = {
+        (CONTRACT_DIR / filename).resolve().as_uri(): load_schema(contract_name)
+        for contract_name, filename in SCHEMAS.items()
+        if (CONTRACT_DIR / filename).is_file()
+    }
+    resolver = RefResolver(base_uri=(CONTRACT_DIR / SCHEMAS[name]).resolve().as_uri(), referrer=schema, store=store_schemas)
     errors = sorted(
-        Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(payload),
+        Draft202012Validator(schema, resolver=resolver, format_checker=FormatChecker()).iter_errors(payload),
         key=lambda error: list(error.absolute_path),
     )
     return [
@@ -105,7 +114,7 @@ def endpoint_credential(endpoint_id: str, authorization: str | None) -> None:
 @app.post("/v1/endpoints", tags=["endpoints"], status_code=201)
 def enroll_endpoint(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
     require_admin(authorization)
-    errors = validate_contract("endpoint", {**payload, "status": "offline", "observed_at": datetime.now(timezone.utc).isoformat()})
+    errors = validate_contract("enrollment", payload)
     if errors:
         raise HTTPException(status_code=422, detail={"code": "invalid_endpoint", "errors": errors})
     try:
@@ -130,7 +139,7 @@ def endpoint_heartbeat(endpoint_id: str, payload: dict[str, Any], authorization:
     endpoint_credential(endpoint_id, authorization)
     payload = {**payload, "endpoint_id": endpoint_id, "tenant_ref": store.get_endpoint(endpoint_id)["tenant_ref"],
                "protocol_version": "v1", "observed_at": datetime.now(timezone.utc).isoformat()}
-    errors = validate_contract("endpoint", payload)
+    errors = validate_contract("heartbeat", {"status": payload["status"], "capabilities": payload["capabilities"]})
     if errors:
         raise HTTPException(status_code=422, detail={"code": "invalid_endpoint", "errors": errors})
     store.heartbeat(endpoint_id, status=payload["status"], capabilities=payload["capabilities"], observed_at=payload["observed_at"])

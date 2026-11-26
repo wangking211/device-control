@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/endpoint-heartbeat.v1.schema.json",
+  "title": "Device Endpoint Heartbeat",
+  "type": "object",
+  "required": ["status", "capabilities"],
+  "properties": {
+    "status": {"enum": ["online", "degraded", "offline"]},
+    "capabilities": {"type": "array", "items": {"$ref": "device-endpoint.schema.json#/$defs/capability"}},
+    "metadata": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}
