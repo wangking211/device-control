@@ -9,6 +9,8 @@ from device_gateway.worker import GatewayWorker, WorkerConfig
 from fastapi.testclient import TestClient
 from support import (
     MANIFEST,
+    REDACTION_KEY,
+    REDACTION_KEY_ID,
     acquire_lease,
     agent_token,
     approver_token,
@@ -61,6 +63,8 @@ def build_worker(tmp_path, stack, adapter=None):
     adapter = adapter or FakeAndroidAdapter(
         allowed_apps={"com.example.notes"},
         device_fingerprint=stack["device_fingerprint"],
+        redaction_key=REDACTION_KEY,
+        redaction_key_id=REDACTION_KEY_ID,
     )
     ledger = DedupeLedger(tmp_path / "gateway-ledger.sqlite3")
     control = ControlPlaneClient(

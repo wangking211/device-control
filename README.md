@@ -74,6 +74,10 @@ from a command envelope. ADB never runs in this FastAPI process.
 - `docs/EVIDENCE_STORE.md`, `docs/PRODUCTION_READINESS.md` — evidence and operations.
 - `docs/contracts/MINDOS_DEVICE_INTENT_MAPPING.md` — MindOS field/status/error mapping.
 - `docs/BASELINE_AUDIT.md` — DC-006…DC-009 baseline audit and blockers.
+- `acceptance/DC010_ACCEPTANCE.md` — DC-010 P0/P1 matrix and NO-GO blockers.
+- `docs/DC010_REBASELINE.md` — real SHAs, interfaces and ownership.
+- `docs/security/SCREENSHOT_REDACTION.md` — redaction pipeline and limits.
+- `docs/MANIFEST_KEY_MANAGEMENT.md` — Ed25519 key generation/rotation.
 - `acceptance/GO_NO_GO.md` — current NO-GO decision and remaining gates.
 - `acceptance/ACCEPTANCE-MATRIX.md` — PASS/FAIL/BLOCKED with commands.
 
@@ -85,5 +89,5 @@ python -m ruff check src tests gateway/src gateway/tests scripts
 python -m mypy src/device_control gateway/src/device_gateway --ignore-missing-imports
 ```
 
-87 tests pass on Python 3.12 / Windows (2026-11-26). See
+102 tests pass on Python 3.12 / Windows (2026-11-27). See
 `acceptance/ACCEPTANCE-MATRIX.md` for the exact run and blocked hardware items.

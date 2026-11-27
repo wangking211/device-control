@@ -178,6 +178,8 @@ def _build_adapter(adapter_kind: str, config: dict[str, Any]) -> DeviceAdapter:
         adapter = FakeAndroidAdapter(
             allowed_apps=set(config.get("allowed_apps") or ()) or None,
             device_fingerprint=str(config.get("device_fingerprint") or "fake-device-fingerprint"),
+            redaction_key=str(config.get("redaction_key") or ""),
+            redaction_key_id=str(config.get("redaction_key_id") or ""),
         )
         if config.get("hang"):
             adapter.hang = True

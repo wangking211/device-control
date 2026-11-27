@@ -153,6 +153,58 @@ def test_state_missing_or_stale_is_rejected():
     assert expired.value.code == "state_expired"
 
 
+def test_state_time_future_quality_and_fingerprint_fail_closed():
+    tap = {
+        "capability_id": "ui.tap", "operation": "tap", "risk_tier": "write",
+        "parameters": {"target_ref": "button-continue", "bounds": [0, 40, 10, 50]},
+        "state_hash": STATE_HASH, "state_version": STATE_VERSION,
+        "policy_decision": "ask", "approval_id": "apr-1", "approval_nonce": "nonce-1",
+    }
+    future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    with pytest.raises(Rejected) as exc:
+        revalidate(envelope(**tap), context(observed_at=future), MANIFEST)
+    assert exc.value.code == "state_time_in_future"
+
+    with pytest.raises(Rejected) as exc:
+        revalidate(envelope(**tap), context(ui_quality="low"), MANIFEST)
+    assert exc.value.code == "state_quality_insufficient"
+
+    no_fingerprint = {**tap, "device_fingerprint": None}
+    with pytest.raises(Rejected) as exc:
+        revalidate(envelope(**no_fingerprint), context(device_fingerprint=None), MANIFEST)
+    assert exc.value.code == "fingerprint_unavailable"
+
+
+def test_ambiguous_target_is_rejected():
+    duplicate = (
+        {"resource_id": "button-continue", "bounds": [0, 40, 10, 50], "editable": False,
+         "sensitive": False, "input_type": "", "visible": True},
+        {"resource_id": "button-continue", "bounds": [0, 60, 10, 70], "editable": False,
+         "sensitive": False, "input_type": "", "visible": True},
+    )
+    tap = {
+        "capability_id": "ui.tap", "operation": "tap", "risk_tier": "write",
+        "parameters": {"target_ref": "button-continue", "bounds": [0, 40, 10, 50]},
+        "state_hash": STATE_HASH, "state_version": STATE_VERSION,
+        "policy_decision": "ask", "approval_id": "apr-1", "approval_nonce": "nonce-1",
+    }
+    with pytest.raises(Rejected) as exc:
+        revalidate(envelope(**tap), context(nodes=duplicate), MANIFEST)
+    assert exc.value.code == "target_ambiguous"
+
+
+def test_upstream_policy_allow_cannot_authorize_a_write():
+    tap = {
+        "capability_id": "ui.tap", "operation": "tap", "risk_tier": "write",
+        "parameters": {"target_ref": "button-continue", "bounds": [0, 40, 10, 50]},
+        "state_hash": STATE_HASH, "state_version": STATE_VERSION,
+        "policy_decision": "allow", "approval_id": None, "approval_nonce": None,
+    }
+    with pytest.raises(Rejected) as exc:
+        revalidate(envelope(**tap), context(), MANIFEST)
+    assert exc.value.code == "policy_decision_mismatch"
+
+
 def test_ask_without_approval_nonce_is_rejected():
     ask = {
         "capability_id": "ui.type_text", "operation": "type_text", "risk_tier": "write",

@@ -44,6 +44,28 @@ Default 7 days (`DEVICE_CONTROL_EVIDENCE_RETENTION_SECONDS`), bounded 1h–90d.
 (`evidence.retention_delete`). Backups copy evidence objects and include hashes
 in `backup-manifest.json`.
 
+## Storage adapter
+
+Routes use `evidence.get_object_store()`; they never instantiate a backend.
+`DEVICE_CONTROL_EVIDENCE_BACKEND` selects:
+
+- `local` (default dev/test): filesystem root `DEVICE_CONTROL_EVIDENCE_DIR`;
+- `foundation`/`s3`/`cos`: `ai_platform_foundation_storage.storage_from_env`
+  (the existing ai-platform storage package). If the package is not installed
+  the service reports storage unavailable instead of silently falling back.
+
+The port exposes put/get/head/list/health/delete. Object keys are immutable
+(`<hash-prefix>/<evidence-id>/content.bin`); tenant isolation is enforced by the
+API before lookup, never by key guessing.
+
+## Backups and restore
+
+`scripts/backup_sqlite.py` writes a consistent DB copy, evidence tree, counts
+and SHA-256 manifest. `scripts/restore_sqlite.py` defaults to a dry run that
+checks DB integrity, the backup manifest, every referenced object hash, and
+lists missing/corrupt/orphan objects. `--apply` refuses a non-empty target and
+copies into an isolated directory. Record RPO/RTO after an actual drill.
+
 ## Limitations
 
 - The local object store is not replicated; production must use durable object

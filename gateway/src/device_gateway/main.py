@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 
 from . import manifest
 from .adapters.android_adb import AdbSettings, AndroidAdbAdapter, discover_devices
@@ -34,19 +35,37 @@ def build_components(settings: GatewaySettings) -> tuple[GatewayWorker, DedupeLe
             adb_path=settings.adb_path,
             serial=settings.serial,
             allowed_apps=settings.allowed_apps,
+            redaction_key=settings.redaction_key,
+            redaction_key_id=settings.redaction_key_id,
         ))
     elif settings.adapter == "fake":
         adapter = FakeAndroidAdapter(
             allowed_apps=set(settings.allowed_apps) or None,
             device_fingerprint=settings.device_fingerprint or "fake-device-fingerprint",
+            redaction_key=settings.redaction_key,
+            redaction_key_id=settings.redaction_key_id,
         )
     else:
         adapter = NullAdapter()
     document = manifest.load(settings.manifest_path or None)
-    if settings.manifest_hmac_key:
+    production = (os.environ.get("DEVICE_GATEWAY_ENV") or "").strip().lower() == "production"
+    if settings.manifest_public_key:
+        if not manifest.verify_ed25519(document, settings.manifest_public_key,
+                                       set(settings.manifest_key_ids)) or not manifest.validate_window(document):
+            raise ValueError("gateway manifest Ed25519 signature or validity window is invalid")
+        if document.get("gateway_id") and document["gateway_id"] != settings.gateway_id:
+            raise ValueError("manifest gateway binding mismatch")
+        if document.get("endpoint_id") and settings.endpoint_id and document["endpoint_id"] != settings.endpoint_id:
+            raise ValueError("manifest endpoint binding mismatch")
+        if document.get("device_fingerprint") and settings.device_fingerprint and \
+                document["device_fingerprint"] != settings.device_fingerprint:
+            raise ValueError("manifest device fingerprint mismatch")
+    elif settings.manifest_require_signature or production:
+        raise ValueError("production requires an Ed25519 manifest public key")
+    elif settings.manifest_hmac_key:
         if not manifest.verify(manifest.digest(document), document.get("signature"),
                                settings.manifest_hmac_key):
-            raise ValueError("gateway manifest signature does not verify")
+            raise ValueError("gateway manifest HMAC signature does not verify")
     ledger = DedupeLedger(settings.db_path)
     runner: Runner
     if settings.process_isolation and settings.adapter == "android":
@@ -57,6 +76,8 @@ def build_components(settings: GatewaySettings) -> tuple[GatewayWorker, DedupeLe
                 "serial": settings.serial,
                 "allowed_apps": sorted(settings.allowed_apps),
                 "device_fingerprint": settings.device_fingerprint,
+                "redaction_key": settings.redaction_key,
+                "redaction_key_id": settings.redaction_key_id,
                 "command_timeout_seconds": 15.0,
             },
             allowed_apps=settings.allowed_apps,
@@ -101,8 +122,6 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(manifest.manifest_document(), indent=2))
         return 0
     if args.discover:
-        import os
-
         print(json.dumps(discover_devices(
             os.environ.get("DEVICE_GATEWAY_ADB_PATH") or "adb"
         ), indent=2))

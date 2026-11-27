@@ -167,6 +167,7 @@ def test_manifest_signature_is_required_when_configured(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
     key = "manifest-signing-key-0123456789abcdef"
     monkeypatch.setenv("DEVICE_CONTROL_MANIFEST_HMAC_KEY", key)
+    monkeypatch.setenv("DEVICE_CONTROL_MANIFEST_ALLOW_HMAC", "true")
     platform = bearer(admin_token())
     created = client.post("/v1/gateways", json={
         "gateway_id": "gw-signed", "protocol_version": "v1", "adapter_inventory": [],
@@ -187,6 +188,57 @@ def test_manifest_signature_is_required_when_configured(tmp_path, monkeypatch):
     rejected = client.put("/v1/gateways/gw-signed/manifest", json=tampered, headers=platform)
     assert rejected.status_code == 422
     assert rejected.json()["code"] == "invalid_manifest_signature"
+
+
+def test_ed25519_manifest_signature_and_key_id(tmp_path, monkeypatch):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    configure(monkeypatch, tmp_path)
+    private = Ed25519PrivateKey.generate()
+    public_pem = private.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode()
+    monkeypatch.setenv("DEVICE_CONTROL_MANIFEST_PUBLIC_KEY", public_pem)
+    monkeypatch.setenv("DEVICE_CONTROL_MANIFEST_KEY_IDS", "release-key-1")
+    platform = bearer(admin_token())
+    created = client.post("/v1/gateways", json={
+        "gateway_id": "gw-ed25519", "protocol_version": "v1", "adapter_inventory": [],
+    }, headers=platform)
+    client.post("/v1/gateways/gw-ed25519/activate", json={
+        "enrollment_token": created.json()["enrollment_token"], "protocol_version": "v1",
+    })
+    signed = deepcopy(MANIFEST)
+    signed.update({"key_id": "release-key-1", "signature_algorithm": "ed25519",
+                   "revision": 1, "tenant_ref": "tenant-a", "gateway_id": "gw-ed25519",
+                   "issued_at": datetime.now(timezone.utc).isoformat()})
+    digest = manifest_rules.digest(signed)
+    signed["signature"] = __import__("base64").b64encode(
+        private.sign(digest.encode("ascii"))
+    ).decode()
+    accepted = client.put("/v1/gateways/gw-ed25519/manifest", json=signed, headers=platform)
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["digest"] == digest
+
+    unknown = {**signed, "key_id": "unknown-key"}
+    rejected = client.put("/v1/gateways/gw-ed25519/manifest", json=unknown, headers=platform)
+    assert rejected.status_code == 422
+    assert rejected.json()["code"] == "manifest_key_unknown"
+
+    tampered = {**signed, "manifest_version": "9.9.9"}
+    rejected = client.put("/v1/gateways/gw-ed25519/manifest", json=tampered, headers=platform)
+    assert rejected.status_code == 422
+    assert rejected.json()["code"] == "invalid_manifest_signature"
+
+    wrong_tenant = deepcopy(signed)
+    wrong_tenant["tenant_ref"] = "tenant-b"
+    wrong_tenant["signature"] = __import__("base64").b64encode(
+        private.sign(manifest_rules.digest(wrong_tenant).encode("ascii"))
+    ).decode()
+    rejected = client.put("/v1/gateways/gw-ed25519/manifest", json=wrong_tenant,
+                          headers=platform)
+    assert rejected.status_code == 409
+    assert rejected.json()["code"] == "manifest_tenant_binding_mismatch"
 
 
 def test_manifest_digest_drift_blocks_dispatch(tmp_path, monkeypatch):

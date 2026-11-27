@@ -7,6 +7,7 @@ command envelope can change them.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -27,8 +28,13 @@ class GatewaySettings:
     endpoint_id: str
     device_id: str
     device_fingerprint: str
+    redaction_key: str
+    redaction_key_id: str
     manifest_path: str
     manifest_hmac_key: str
+    manifest_public_key: str
+    manifest_require_signature: bool
+    manifest_key_ids: frozenset[str]
     process_isolation: bool
     state_max_age_seconds: float
 
@@ -56,22 +62,49 @@ def from_env(env: dict[str, str] | None = None) -> GatewaySettings:
         endpoint_id=(values.get("DEVICE_GATEWAY_ENDPOINT_ID") or "").strip(),
         device_id=(values.get("DEVICE_GATEWAY_DEVICE_ID") or "").strip(),
         device_fingerprint=(values.get("DEVICE_GATEWAY_DEVICE_FINGERPRINT") or "").strip(),
+        redaction_key=(values.get("DEVICE_GATEWAY_REDACTION_HMAC_KEY") or "").strip(),
+        redaction_key_id=(values.get("DEVICE_GATEWAY_REDACTION_KEY_ID") or "").strip(),
         manifest_path=(values.get("DEVICE_GATEWAY_MANIFEST") or "").strip(),
         manifest_hmac_key=(values.get("DEVICE_GATEWAY_MANIFEST_HMAC_KEY") or "").strip(),
+        manifest_public_key=_read_key(values.get("DEVICE_GATEWAY_MANIFEST_PUBLIC_KEY") or "",
+                                      values.get("DEVICE_GATEWAY_MANIFEST_PUBLIC_KEY_PATH") or ""),
+        manifest_require_signature=(values.get("DEVICE_GATEWAY_MANIFEST_REQUIRE_SIGNATURE") or "")
+        .strip().lower() in {"1", "true", "yes"},
+        manifest_key_ids=frozenset(
+            item.strip() for item in (values.get("DEVICE_GATEWAY_MANIFEST_KEY_IDS") or "").split(",")
+            if item.strip()
+        ),
         process_isolation=(values.get("DEVICE_GATEWAY_PROCESS_ISOLATION") or "1").lower()
         in {"1", "true", "yes"},
         state_max_age_seconds=float(values.get("DEVICE_GATEWAY_STATE_MAX_AGE_SECONDS") or 15),
     )
-    _validate(settings)
+    _validate(settings, values)
     return settings
 
 
-def _validate(settings: GatewaySettings) -> None:
+def _read_key(inline: str, path: str) -> str:
+    if inline.startswith("-----BEGIN"):
+        return inline
+    if path:
+        try:
+            from pathlib import Path
+
+            return Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+    return ""
+
+
+def _validate(settings: GatewaySettings, values: Mapping[str, str]) -> None:
     if not settings.control_url.startswith(("http://", "https://")):
         raise ValueError("DEVICE_CONTROL_URL must be an http(s) URL")
-    if settings.control_url.startswith("http://") and not (
-        settings.control_url.startswith("http://127.0.0.1")
-        or settings.control_url.startswith("http://localhost")
+    loopback = settings.control_url.startswith(("http://127.0.0.1", "http://localhost"))
+    dev_profile = (values.get("DEVICE_GATEWAY_ENV") or "").strip().lower() in {"dev", "test"}
+    allow_insecure = (values.get("DEVICE_GATEWAY_ALLOW_INSECURE_HTTP") or "").lower() in {
+        "1", "true", "yes",
+    }
+    if settings.control_url.startswith("http://") and not loopback and not (
+        dev_profile and allow_insecure
     ):
         raise ValueError("DEVICE_CONTROL_URL must use HTTPS outside loopback")
     if not settings.gateway_id:
@@ -91,5 +124,7 @@ def _validate(settings: GatewaySettings) -> None:
             raise ValueError("DEVICE_GATEWAY_ENDPOINT_ID is required for the android adapter")
         if not settings.device_fingerprint:
             raise ValueError("DEVICE_GATEWAY_DEVICE_FINGERPRINT is required for the android adapter")
+        if len(settings.redaction_key.encode("utf-8")) < 32:
+            raise ValueError("DEVICE_GATEWAY_REDACTION_HMAC_KEY is required for the android adapter")
     if settings.queue_capacity < 1:
         raise ValueError("DEVICE_GATEWAY_QUEUE_SIZE must be positive")

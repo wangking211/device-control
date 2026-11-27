@@ -1,8 +1,10 @@
+import io
 import subprocess
 
 import pytest
 from device_gateway.adapters.android_adb import AdbSettings, AndroidAdbAdapter
 from device_gateway.adapters.base import AdapterError, AdapterTimeout
+from PIL import Image
 
 UI_XML = b"""<?xml version='1.0' encoding='UTF-8'?>
 <hierarchy rotation="0">
@@ -30,6 +32,8 @@ def adapter(**overrides):
         serial="emulator-5554",
         allowed_apps=frozenset({"com.example.notes"}),
         command_timeout_seconds=5.0,
+        redaction_key="gateway-redaction-test-key-0123456789abcdef",
+        redaction_key_id="test-key-1",
     )
     if overrides:
         settings = AdbSettings(**{**settings.__dict__, **overrides})
@@ -37,6 +41,10 @@ def adapter(**overrides):
 
 
 def fake_run_factory(calls):
+    buffer = io.BytesIO()
+    Image.new("RGB", (240, 360), (255, 255, 255)).save(buffer, format="PNG")
+    png = buffer.getvalue()
+
     def fake_run(command, **kwargs):
         calls.append((command, kwargs))
         joined = " ".join(command)
@@ -53,7 +61,7 @@ def fake_run_factory(calls):
         if "getprop" in joined:
             return FakeCompleted(stdout=b"test-value")
         if "screencap" in joined:
-            return FakeCompleted(stdout=b"\x89PNG\r\n\x1a\n" + b"x" * 100)
+            return FakeCompleted(stdout=png)
         return FakeCompleted(stdout=b"device\n")
     return fake_run
 

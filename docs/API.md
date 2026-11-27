@@ -46,6 +46,7 @@ Errors use `{"code": "...", "detail": ...}` with the semantics in
 | POST | `/v1/gateways/{id}/commands/{cid}/progress` | gateway credential |
 | POST | `/v1/gateways/{id}/commands/{cid}/result` | gateway credential |
 | POST | `/v1/gateways/{id}/commands/{cid}/evidence` | gateway credential + raw bytes |
+| GET | `/v1/evidence-storage/health` | `device.audit.read` |
 
 ## Leases, policy, approvals
 
@@ -117,6 +118,11 @@ POST /v1/gateways/gateway-a/commands/cmd_.../result
   "evidence_refs": ["sha256:..."]
 }
 ```
+
+Screenshots and node summaries also require `X-Original-SHA256`,
+`X-Redaction-Processor`, `X-Redaction-Policy`, `X-Redaction-Key-Id`,
+`X-Redaction-Proof` and `X-Redaction-Regions`; the server re-decodes PNG and
+verifies the proof. Unproven/`restricted` evidence is rejected.
 
 Event poll: `GET /v1/events?after_occurred_at=...&after_event_id=...`, then
 `POST /v1/events/ack {"event_ids": [...]}`.

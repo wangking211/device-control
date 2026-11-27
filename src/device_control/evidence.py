@@ -12,7 +12,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from device_control import config
 
@@ -30,8 +30,30 @@ class ObjectStore(Protocol):
     def get(self, key: str) -> bytes:
         ...
 
+    def head(self, key: str) -> dict[str, Any]:
+        ...
+
+    def list(self, prefix: str = "") -> list[str]:
+        ...
+
+    def health(self) -> dict[str, Any]:
+        ...
+
     def delete(self, key: str) -> None:
         ...
+
+
+def get_object_store() -> ObjectStore:
+    backend = (os.environ.get("DEVICE_CONTROL_EVIDENCE_BACKEND") or "local").strip().lower()
+    if backend in {"foundation", "ai-platform", "s3", "cos"}:
+        try:
+            from ai_platform_foundation_storage import storage_from_env
+        except ImportError as exc:
+            raise EvidenceStoreError(
+                "DEVICE_CONTROL_EVIDENCE_BACKEND=foundation but ai-platform-foundation-storage is not installed"
+            ) from exc
+        return FoundationObjectStore(storage_from_env())
+    return LocalObjectStore()
 
 
 class LocalObjectStore:
@@ -69,9 +91,53 @@ class LocalObjectStore:
         except OSError as exc:
             raise EvidenceStoreError("evidence object is unavailable") from exc
 
+    def head(self, key: str) -> dict[str, Any]:
+        target = self._path(key)
+        if not target.is_file():
+            raise EvidenceStoreError("evidence object is unavailable")
+        return {"key": key, "size": target.stat().st_size}
+
+    def list(self, prefix: str = "") -> list[str]:
+        base = self.root if not prefix else self._path(prefix.rstrip("/") + "/x").parent
+        return [
+            str(path.relative_to(self.root)).replace(os.sep, "/")
+            for path in base.rglob("*") if path.is_file()
+        ]
+
+    def health(self) -> dict[str, Any]:
+        return {"backend": "local", "root_writable": os.access(self.root, os.W_OK)}
+
     def delete(self, key: str) -> None:
         target = self._path(key)
         try:
             target.unlink(missing_ok=True)
         except OSError:
             return
+
+
+class FoundationObjectStore:
+    """Adapter over ai-platform-foundation-storage (local/S3/COS)."""
+
+    def __init__(self, store: Any) -> None:
+        self.store = store
+
+    def put(self, key: str, data: bytes) -> None:
+        self.store.write(key, data)
+
+    def get(self, key: str) -> bytes:
+        return self.store.read(key)
+
+    def head(self, key: str) -> dict[str, Any]:
+        info = self.store.head(key)
+        return {"key": key, "size": getattr(info, "size", None)}
+
+    def list(self, prefix: str = "") -> list[str]:
+        if hasattr(self.store, "list"):
+            return list(self.store.list(prefix))
+        return []
+
+    def health(self) -> dict[str, Any]:
+        return {"backend": "foundation"}
+
+    def delete(self, key: str) -> None:
+        self.store.delete(key)

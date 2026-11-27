@@ -1,8 +1,8 @@
-# Go / No-Go — DC-006…DC-009
+# Go / No-Go — DC-006…DC-010
 
-Date: 2026-11-26
-Baseline: `cb13f8b1e64ad60077191ec47653f57f545b180f`
-Implementation commit: see `git log -1 --format=%H` on `main`.
+Date: 2026-11-27
+Baseline: `718746005827f8a371f10f631951d07dc38342aa`
+Implementation commits: see `git log` on `main`.
 
 ## Decision: **NO-GO**
 
@@ -13,7 +13,7 @@ real-device/production PASS.
 
 ## What passed
 
-- 87 automated tests (pytest), Ruff, mypy.
+- 102 automated tests (pytest), Ruff, mypy.
 - Bandit 1.9.4 clean; config skips only `B101`; targeted `# nosec` on fixed
   subprocess/parameterized SQL lines.
 - `pip-audit -r requirements/audit.txt`: no known vulnerabilities.
@@ -25,6 +25,12 @@ real-device/production PASS.
 - DC-008: OpenAPI export, MindOS intent mapping, provider contract tests.
 - DC-009: HTTPS enforcement, preflight, signed upgrade verification, SQLite
   backup/restore tooling, admin shell, alerts.
+- DC-010: real structural screenshot redaction with re-decode and HMAC proof;
+  server-side proof/hash/image verification; gateway independently derives
+  allow/ask from manifest risk; Ed25519 manifest+key id/window; state
+  freshness/uniqueness/quality checks; evidence storage DI + foundation-storage
+  adapter; restore dry-run tool; OpenAPI constraints and dev-only compose HTTP;
+  MindOS Device Control provider module/descriptor and contract tests.
 
 ## Blocking rows (must be executed before GO)
 
@@ -37,6 +43,8 @@ real-device/production PASS.
 | D | Docker start/restart persistence, read-only/disk-full/db-corruption drills | BLOCKED (no Docker) |
 | D | TLS/mTLS termination and credential rotation on the deployed ingress | BLOCKED |
 | D | Backup/restore drill with RPO/RTO on production-like volumes | BLOCKED |
+| A | Real Android structural redaction evidence on password/OTP/payment screens | BLOCKED |
+| C | MindOS live Provider registration/TaskRun approval/evidence loop | BLOCKED |
 
 ## Next execution steps
 

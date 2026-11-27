@@ -61,6 +61,40 @@ def manifest_hmac_key() -> str:
     return os.environ.get("DEVICE_CONTROL_MANIFEST_HMAC_KEY", "")
 
 
+def manifest_public_key() -> str:
+    value = os.environ.get("DEVICE_CONTROL_MANIFEST_PUBLIC_KEY", "")
+    if value.startswith("-----BEGIN"):
+        return value
+    path = os.environ.get("DEVICE_CONTROL_MANIFEST_PUBLIC_KEY_PATH", "")
+    if path:
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+    return ""
+
+
+def manifest_require_signature() -> bool:
+    raw = (os.environ.get("DEVICE_CONTROL_MANIFEST_REQUIRE_SIGNATURE") or "").strip().lower()
+    if raw:
+        return raw in {"1", "true", "yes"}
+    return is_production()
+
+
+def manifest_allowed_key_ids() -> set[str]:
+    raw = os.environ.get("DEVICE_CONTROL_MANIFEST_KEY_IDS", "")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def manifest_allow_hmac() -> bool:
+    raw = (os.environ.get("DEVICE_CONTROL_MANIFEST_ALLOW_HMAC") or "").strip().lower()
+    return raw in {"1", "true", "yes"}
+
+
+def redaction_hmac_key() -> str:
+    return os.environ.get("DEVICE_CONTROL_REDACTION_HMAC_KEY", "")
+
+
 def require_https() -> bool:
     value = (os.environ.get("DEVICE_CONTROL_REQUIRE_HTTPS") or "").strip().lower()
     return value in {"1", "true", "yes"} or is_production()

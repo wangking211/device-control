@@ -24,8 +24,10 @@ def test_sqlite_backup_and_integrity_manifest(tmp_path):
     import sqlite3
 
     connection = sqlite3.connect(db)
-    connection.execute("CREATE TABLE device_evidence (id TEXT PRIMARY KEY)")
-    connection.execute("INSERT INTO device_evidence VALUES ('one')")
+    connection.execute(
+        "CREATE TABLE device_evidence (id TEXT PRIMARY KEY, tenant_ref TEXT,"
+        " storage_ref TEXT, content_sha256 TEXT, size_bytes INTEGER, deleted_at TEXT)"
+    )
     connection.commit()
     connection.close()
     out = tmp_path / "backup"
@@ -33,8 +35,12 @@ def test_sqlite_backup_and_integrity_manifest(tmp_path):
     assert result.returncode == 0, result.stderr
     manifest = json.loads((out / "backup-manifest.json").read_text())
     assert manifest["database_sha256"]
-    assert manifest["counts"]["device_evidence"] == 1
+    assert manifest["counts"]["device_evidence"] == 0
     assert (out / "device-control.sqlite3").is_file()
+
+    dry = run("restore_sqlite.py", "--backup", str(out), "--target", str(tmp_path / "restore"))
+    assert dry.returncode == 0, dry.stdout
+    assert json.loads(dry.stdout)["dry_run"] is True
 
 
 def test_signed_upgrade_is_verified_or_rejected(tmp_path):

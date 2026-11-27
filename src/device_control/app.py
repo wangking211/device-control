@@ -1,4 +1,4 @@
-"""FastAPI control plane for Device Control.
+﻿"""FastAPI control plane for Device Control.
 
 Ownership boundary: this process owns device/gateway identity, endpoint
 inventory, leases, policy, approvals, command coordination and evidence
@@ -7,7 +7,10 @@ metadata. It never runs ADB, drivers or device shell commands.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
+import io
 import json
 import secrets
 import threading
@@ -116,6 +119,11 @@ async def limits_middleware(request: Request, call_next: Callable[..., Any]):
 @app.exception_handler(DeviceControlError)
 async def device_control_error(_: Request, exc: DeviceControlError) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content=exc.envelope(), headers=exc.headers)
+
+
+@app.exception_handler(evidence_store.EvidenceStoreError)
+async def evidence_store_error(_: Request, exc: evidence_store.EvidenceStoreError) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"code": "evidence_storage_unavailable"})
 
 
 # ---------------------------------------------------------------------------
@@ -430,14 +438,46 @@ def register_gateway_manifest(
         raise invalid("invalid_manifest", errors)
     digest = manifest_digest(payload)
     signature = payload.get("signature")
-    key = config.manifest_hmac_key()
-    if key:
-        if len(key.encode("utf-8")) < 32:
-            raise dependency_unavailable("manifest_signing_key_too_short")
-        if not isinstance(signature, str) or not verify_manifest_signature(digest, signature, key):
+    algorithm = payload.get("signature_algorithm")
+    public_key_pem = config.manifest_public_key()
+    require_signature = config.manifest_require_signature()
+    key_id = str(payload.get("key_id") or "")
+    allowed_keys = config.manifest_allowed_key_ids()
+    if allowed_keys and key_id not in allowed_keys:
+        raise invalid("manifest_key_unknown")
+    if public_key_pem:
+        if algorithm != "ed25519" or not isinstance(signature, str):
+            raise invalid("manifest_signature_required")
+        try:
+            from cryptography.hazmat.primitives import serialization
+
+            key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
+            key.verify(base64.b64decode(signature), digest.encode("ascii"))  # type: ignore[call-arg]
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            raise invalid("invalid_manifest_signature") from exc
+    elif config.manifest_hmac_key() and config.manifest_allow_hmac():
+        if algorithm not in {None, "hmac-sha256"}:
+            raise invalid("unsupported_manifest_signature_algorithm")
+        if not isinstance(signature, str) or not verify_manifest_signature(
+            digest, signature, config.manifest_hmac_key()
+        ):
             raise invalid("invalid_manifest_signature")
-    elif config.is_production():
-        raise dependency_unavailable("manifest_signing_key_unconfigured")
+    elif require_signature:
+        raise dependency_unavailable("manifest_public_key_unconfigured")
+    expires_at = payload.get("expires_at")
+    if expires_at:
+        try:
+            if store.parse_timestamp(expires_at) <= store.now():
+                raise invalid("manifest_expired")
+        except (ValueError, TypeError) as exc:
+            raise invalid("manifest_invalid_expiry") from exc
+    issued_at = payload.get("issued_at")
+    if issued_at:
+        try:
+            if store.parse_timestamp(issued_at) > store.now() + timedelta(minutes=5):
+                raise invalid("manifest_issued_in_future")
+        except (ValueError, TypeError) as exc:
+            raise invalid("manifest_invalid_issued_at") from exc
     return store.register_gateway_manifest(
         tenant=_tenant(principal, tenant_ref),
         gateway_id=gateway_id,
@@ -924,6 +964,12 @@ async def upload_evidence(
     x_evidence_type: str | None = Header(default=None),
     x_content_sha256: str | None = Header(default=None),
     x_redaction_status: str | None = Header(default=None),
+    x_original_sha256: str | None = Header(default=None),
+    x_redaction_processor: str | None = Header(default=None),
+    x_redaction_policy: str | None = Header(default=None),
+    x_redaction_key_id: str | None = Header(default=None),
+    x_redaction_proof: str | None = Header(default=None),
+    x_redaction_regions: str | None = Header(default=None),
     x_retention_seconds: str | None = Header(default=None),
     x_captured_at: str | None = Header(default=None),
 ) -> dict[str, Any]:
@@ -935,14 +981,54 @@ async def upload_evidence(
         raise invalid("invalid_evidence_type")
     if redaction not in REDACTION_STATUSES:
         raise invalid("redaction_required")
-    if evidence_type in {"screenshot", "node_summary"} and redaction == "not_required":
-        raise invalid("redaction_required")
     body = await request.body()
     if len(body) == 0 or len(body) > config.evidence_max_bytes():
         raise invalid("invalid_evidence_size")
+    if content_type == "image/png":
+        try:
+            from PIL import Image
+
+            with Image.open(io.BytesIO(body)) as image:
+                image.verify()
+                if image.format != "PNG" or image.width < 1 or image.height < 1:
+                    raise ValueError("invalid png")
+        except Exception as exc:  # noqa: BLE001 - fail closed on any decode error
+            raise invalid("invalid_evidence_image") from exc
     digest = sha256_hex(body)
     if not x_content_sha256 or not hmac.compare_digest(digest, x_content_sha256.strip().lower()):
         raise invalid("evidence_hash_mismatch")
+    regions: list[dict[str, Any]] = []
+    if x_redaction_regions:
+        try:
+            decoded = base64.b64decode(x_redaction_regions.encode("ascii"), validate=True)
+            regions = json.loads(decoded.decode("utf-8"))
+            if not isinstance(regions, list):
+                raise ValueError("regions must be a list")
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise invalid("invalid_redaction_regions") from exc
+    if evidence_type in {"screenshot", "node_summary"}:
+        if redaction != "redacted":
+            raise invalid("redaction_required")
+        key = config.redaction_hmac_key()
+        if len(key.encode("utf-8")) < 32:
+            raise dependency_unavailable("redaction_proof_not_configured")
+        if not x_original_sha256 or not x_redaction_processor or not x_redaction_policy:
+            raise invalid("redaction_proof_incomplete")
+        payload = {
+            "original_sha256": x_original_sha256,
+            "output_sha256": digest,
+            "processor": x_redaction_processor,
+            "policy_version": x_redaction_policy,
+            "key_id": x_redaction_key_id or "",
+            "regions": regions,
+        }
+        expected = hmac.new(
+            key.encode("utf-8"),
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not x_redaction_proof or not hmac.compare_digest(expected, x_redaction_proof):
+            raise invalid("redaction_proof_invalid")
     command = store.get_command(gateway["tenant_ref"], command_id)
     if command is None or command["gateway_id"] != gateway_id:
         raise hidden()
@@ -952,7 +1038,7 @@ async def upload_evidence(
     captured_at = x_captured_at or store.iso()
     evidence_id = f"evd_{secrets.token_urlsafe(18)}"
     storage_ref = f"{digest[:2]}/{evidence_id}/content.bin"
-    object_store = evidence_store.LocalObjectStore()
+    object_store = evidence_store.get_object_store()
     object_store.put(storage_ref, body)
     try:
         metadata = store.create_evidence(
@@ -973,11 +1059,28 @@ async def upload_evidence(
             task_ref=command.get("task_ref"),
             run_ref=command.get("run_ref"),
             correlation_id=command.get("correlation_id"),
+            original_sha256=x_original_sha256,
+            redaction_processor=x_redaction_processor,
+            redaction_policy_version=x_redaction_policy,
+            redaction_key_id=x_redaction_key_id,
+            redaction_proof=x_redaction_proof,
+            redaction_regions=regions,
         )
     except Exception:
         object_store.delete(storage_ref)
         raise
     return metadata
+
+
+@app.get("/v1/evidence-storage/health", tags=["evidence"])
+def evidence_storage_health(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_scope(authorization, identity.SCOPE_AUDIT_READ)
+    try:
+        return evidence_store.get_object_store().health()
+    except Exception as exc:  # noqa: BLE001 - health must not leak details
+        return {"backend": "unavailable", "error": type(exc).__name__}
 
 
 @app.get("/v1/evidence/{evidence_id}", tags=["evidence"])
@@ -1004,7 +1107,7 @@ def evidence_content(
     metadata = store.get_evidence(tenant, evidence_id)
     if metadata is None or metadata.get("deleted_at"):
         raise hidden()
-    body = evidence_store.LocalObjectStore().get(metadata["storage_ref"])
+    body = evidence_store.get_object_store().get(metadata["storage_ref"])
     if sha256_hex(body) != metadata["content_sha256"]:
         raise dependency_unavailable("evidence_integrity_failure")
     store.record_evidence_access(tenant, evidence_id,
@@ -1033,7 +1136,7 @@ def delete_evidence(
     )
     if metadata is None:
         raise hidden()
-    evidence_store.LocalObjectStore().delete(metadata["storage_ref"])
+    evidence_store.get_object_store().delete(metadata["storage_ref"])
     return {"evidence_id": evidence_id, "status": "deleted"}
 
 
@@ -1218,7 +1321,7 @@ def run_maintenance(authorization: str | None = Header(default=None)) -> dict[st
         raise forbidden("admin_scope_required")
     summary = store.maintenance()
     purged = 0
-    object_store = evidence_store.LocalObjectStore()
+    object_store = evidence_store.get_object_store()
     for metadata in store.expired_evidence():
         object_store.delete(metadata["storage_ref"])
         store.purge_evidence_record(metadata["tenant_ref"], metadata["evidence_id"])

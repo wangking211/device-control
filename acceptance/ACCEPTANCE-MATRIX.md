@@ -5,7 +5,7 @@ Environment for this run (2026-11-26):
 - Windows, Python 3.12.9, pytest 9.1.1, FastAPI 0.116.1, jsonschema 4.26.0
 - No `adb` on PATH, no Android emulator/device, no Docker daemon
 - Command: `python -m pytest -q` from `products/device-control`
-- Result: **87 passed** (control-plane + gateway/adapter + evidence/ops tests)
+- Result: **102 passed** (control-plane + gateway/adapter + evidence/ops tests)
   - `python -m ruff check ...` → pass
   - `python -m mypy src/device_control gateway/src/device_gateway` → pass
   - `bandit -c .bandit -r src gateway/src` → 0 issues, only `B101` globally skipped

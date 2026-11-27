@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 PROTOCOL_VERSION = "v1"
@@ -203,8 +204,9 @@ DENY_RISK = {"destructive", "safety_critical"}
 
 
 def _payload(manifest: dict[str, Any]) -> dict[str, Any]:
-    fields = ("manifest_id", "manifest_version", "protocol_version", "endpoint_id",
-              "device_id", "device_fingerprint", "capabilities")
+    fields = ("manifest_id", "manifest_version", "protocol_version", "tenant_ref",
+              "gateway_id", "endpoint_id", "device_id", "device_fingerprint", "revision",
+              "issued_at", "expires_at", "key_id", "signature_algorithm", "capabilities")
     return {field: manifest[field] for field in fields if field in manifest}
 
 
@@ -223,6 +225,43 @@ def verify(manifest_digest: str, signature: str | None, key: str) -> bool:
     if not signature or len(key.encode("utf-8")) < 32:
         return False
     return hmac.compare_digest(sign(manifest_digest, key), signature)
+
+
+def verify_ed25519(manifest: dict[str, Any], public_key_pem: str,
+                   allowed_key_ids: set[str] | None = None) -> bool:
+    if manifest.get("signature_algorithm") != "ed25519" or not manifest.get("signature"):
+        return False
+    if allowed_key_ids and manifest.get("key_id") not in allowed_key_ids:
+        return False
+    try:
+        import base64
+
+        from cryptography.hazmat.primitives import serialization
+
+        key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
+        key.verify(base64.b64decode(str(manifest["signature"])), digest(manifest).encode("ascii"))
+        return True
+    except Exception:  # noqa: BLE001 - fail closed
+        return False
+
+
+def validate_window(manifest: dict[str, Any], now: datetime | None = None) -> bool:
+    current = now or datetime.now(timezone.utc)
+    for field in ("issued_at", "expires_at"):
+        value = manifest.get(field)
+        if value is None:
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if parsed.tzinfo is None:
+            return False
+        if field == "issued_at" and parsed > current + timedelta(minutes=5):
+            return False
+        if field == "expires_at" and parsed <= current:
+            return False
+    return True
 
 
 def default_document() -> dict[str, Any]:

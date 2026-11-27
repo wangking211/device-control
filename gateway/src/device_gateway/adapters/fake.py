@@ -9,11 +9,15 @@ Accessibility-like node summaries, never screen text.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import time
 from datetime import datetime, timezone
 from typing import Any
 
+from PIL import Image
+
+from ..redaction import redact_png
 from .base import ActionResult, AdapterError, AdapterTimeout
 
 
@@ -22,9 +26,12 @@ class FakeAndroidAdapter:
     version = "1.1.0"
 
     def __init__(self, *, allowed_apps: set[str] | None = None,
-                 device_fingerprint: str = "fake-device-fingerprint") -> None:
+                 device_fingerprint: str = "fake-device-fingerprint",
+                 redaction_key: str = "", redaction_key_id: str = "") -> None:
         self.allowed_apps = allowed_apps or {"com.example.notes"}
         self.device_fingerprint = device_fingerprint
+        self.redaction_key = redaction_key
+        self.redaction_key_id = redaction_key_id
         self.state: dict[str, Any] = {
             "screen": "home",
             "foreground_app": None,
@@ -112,15 +119,29 @@ class FakeAndroidAdapter:
             return ActionResult(status="succeeded", executed=False,
                                 output={"state": state}, verification=self._verify("ui_state"))
         if capability_id == "device.screenshot":
-            raw = json.dumps(self.state, sort_keys=True).encode()
-            png = b"\x89PNG\r\n\x1a\n" + raw
+            buffer = io.BytesIO()
+            Image.new("RGB", (240, 360), (250, 250, 250)).save(buffer, format="PNG")
+            redacted, redaction_result = redact_png(
+                buffer.getvalue(), nodes=list(self.nodes.values()),
+                key=self.redaction_key, key_id=self.redaction_key_id,
+            )
+            if redacted is None or redaction_result.status != "redacted":
+                return ActionResult(status="executed_unverified", executed=True,
+                                    output={"redaction_status": redaction_result.status,
+                                            "redaction_reason": redaction_result.reason},
+                                    reason=f"redaction_{redaction_result.status}")
             return ActionResult(
                 status="succeeded", executed=True,
-                output={"screenshot_sha256": hashlib.sha256(png).hexdigest(),
-                        "bytes": len(png), "mime_type": "image/png", "redacted": True},
+                output={"screenshot_sha256": redaction_result.output_sha256,
+                        "original_sha256": redaction_result.original_sha256,
+                        "bytes": len(redacted), "mime_type": "image/png", "redacted": True,
+                        "redaction_processor": redaction_result.processor,
+                        "redaction_policy": redaction_result.policy_version,
+                        "redaction_regions": len(redaction_result.regions)},
                 verification=self._verify("artifact"),
-                evidence_refs=[f"sha256:{hashlib.sha256(png).hexdigest()}"],
-                artifact_bytes=png,
+                evidence_refs=[f"sha256:{redaction_result.output_sha256}"],
+                artifact_bytes=redacted,
+                redaction=redaction_result.metadata(),
             )
         if capability_id == "app.launch":
             app_id = parameters["app_id"]

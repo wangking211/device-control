@@ -3,6 +3,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
     environment:
       DEVICE_CONTROL_ENV: ${DEVICE_CONTROL_ENV:-local}
       DEVICE_CONTROL_DB: /data/device-control.sqlite3
@@ -12,6 +19,8 @@ services:
       MINDOS_IDENTITY_HMAC_KEY: ${MINDOS_IDENTITY_HMAC_KEY:-}
       MINDOS_IDENTITY_ISSUER: ${MINDOS_IDENTITY_ISSUER:-}
       DEVICE_CONTROL_MANIFEST_HMAC_KEY: ${DEVICE_CONTROL_MANIFEST_HMAC_KEY:-}
+      DEVICE_CONTROL_REDACTION_HMAC_KEY: ${DEVICE_CONTROL_REDACTION_HMAC_KEY:-}
+      DEVICE_CONTROL_EVIDENCE_BACKEND: ${DEVICE_CONTROL_EVIDENCE_BACKEND:-local}
     ports:
       - "8085:8085"
     volumes:
@@ -22,10 +31,19 @@ services:
     build:
       context: .
       dockerfile: gateway/Dockerfile
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
     depends_on:
       - device-control
     environment:
       DEVICE_CONTROL_URL: http://device-control:8085
+      DEVICE_GATEWAY_ENV: dev
+      DEVICE_GATEWAY_ALLOW_INSECURE_HTTP: "1"
       DEVICE_GATEWAY_ID: ${DEVICE_GATEWAY_ID:-dev-gateway}
       DEVICE_GATEWAY_CREDENTIAL: ${DEVICE_GATEWAY_CREDENTIAL:?run scripts/bootstrap_gateway.py first}
       DEVICE_GATEWAY_ADAPTER: ${DEVICE_GATEWAY_ADAPTER:-fake}
@@ -35,6 +53,9 @@ services:
       DEVICE_GATEWAY_DEVICE_ID: ${DEVICE_GATEWAY_DEVICE_ID:-device-phone-1}
       DEVICE_GATEWAY_DEVICE_FINGERPRINT: ${DEVICE_GATEWAY_DEVICE_FINGERPRINT:-}
       DEVICE_GATEWAY_MANIFEST_HMAC_KEY: ${DEVICE_GATEWAY_MANIFEST_HMAC_KEY:-}
+      DEVICE_GATEWAY_REDACTION_HMAC_KEY: ${DEVICE_GATEWAY_REDACTION_HMAC_KEY:-}
+      DEVICE_GATEWAY_REDACTION_KEY_ID: ${DEVICE_GATEWAY_REDACTION_KEY_ID:-dev-local}
+      DEVICE_GATEWAY_MANIFEST_REQUIRE_SIGNATURE: "false"
       DEVICE_GATEWAY_PROCESS_ISOLATION: "1"
       DEVICE_GATEWAY_STATE_MAX_AGE_SECONDS: "15"
     volumes:

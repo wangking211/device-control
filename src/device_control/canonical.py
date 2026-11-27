@@ -37,9 +37,16 @@ MANIFEST_DIGEST_FIELDS = (
     "manifest_id",
     "manifest_version",
     "protocol_version",
+    "tenant_ref",
+    "gateway_id",
     "endpoint_id",
     "device_id",
     "device_fingerprint",
+    "revision",
+    "issued_at",
+    "expires_at",
+    "key_id",
+    "signature_algorithm",
     "capabilities",
 )
 

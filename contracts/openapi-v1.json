@@ -1927,6 +1927,57 @@
         ]
       }
     },
+    "/v1/evidence-storage/health": {
+      "get": {
+        "operationId": "evidence_storage_health_v1_evidence_storage_health_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Evidence Storage Health V1 Evidence Storage Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Evidence Storage Health",
+        "tags": [
+          "evidence"
+        ]
+      }
+    },
     "/v1/evidence/{evidence_id}": {
       "delete": {
         "operationId": "delete_evidence_v1_evidence__evidence_id__delete",
@@ -2639,6 +2690,102 @@
                 }
               ],
               "title": "X-Redaction-Status"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-original-sha256",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Original-Sha256"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-redaction-processor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Redaction-Processor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-redaction-policy",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Redaction-Policy"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-redaction-key-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Redaction-Key-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-redaction-proof",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Redaction-Proof"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-redaction-regions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Redaction-Regions"
             }
           },
           {

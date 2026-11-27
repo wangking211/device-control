@@ -11,6 +11,8 @@ Failure policy:
 
 from __future__ import annotations
 
+import base64
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -230,6 +232,7 @@ class GatewayWorker:
                 device_fingerprint=fingerprint,
                 allowed_apps=frozenset(getattr(self.runner, "allowed_apps", frozenset())),
                 nodes=tuple(observed.get("nodes") or ()),
+                ui_quality=str(observed.get("quality") or "low"),
             ), self.manifest)
         except Rejected as exc:
             self._report(command, status="rejected", reason=f"{exc.code}: {exc.reason}",
@@ -248,8 +251,9 @@ class GatewayWorker:
                                          "capability_id": command.get("capability_id")})
         result = self._execute(command)
         artifact = result.pop("artifact_bytes", None)
+        redaction = result.pop("redaction", None)
         if artifact:
-            uploaded = self._upload_evidence(command, artifact)
+            uploaded = self._upload_evidence(command, artifact, redaction)
             if uploaded:
                 result["evidence_refs"] = [*result.get("evidence_refs", []), uploaded]
             elif result["status"] == "succeeded":
@@ -305,22 +309,35 @@ class GatewayWorker:
             "evidence_refs": outcome.evidence_refs,
             "executed": outcome.executed,
             "artifact_bytes": outcome.artifact_bytes,
+            "redaction": outcome.redaction,
         }
 
     # -- reporting ------------------------------------------------------
 
-    def _upload_evidence(self, command: dict[str, Any], data: bytes) -> str | None:
+    def _upload_evidence(self, command: dict[str, Any], data: bytes,
+                         redaction: dict[str, Any] | None = None) -> str | None:
         capability_id = str(command.get("capability_id") or "")
         if capability_id == "device.screenshot":
             evidence_type, mime_type = "screenshot", "image/png"
         else:
             evidence_type, mime_type = "node_summary", "application/json"
+        headers = {
+            "X-Original-SHA256": str((redaction or {}).get("original_sha256") or ""),
+            "X-Redaction-Processor": str((redaction or {}).get("processor") or ""),
+            "X-Redaction-Policy": str((redaction or {}).get("policy_version") or ""),
+            "X-Redaction-Key-Id": str((redaction or {}).get("key_id") or ""),
+            "X-Redaction-Proof": str((redaction or {}).get("proof") or ""),
+            "X-Redaction-Regions": base64.b64encode(
+                json.dumps((redaction or {}).get("regions") or [], sort_keys=True).encode()
+            ).decode("ascii"),
+        }
         try:
             metadata = self.client.upload_evidence(
                 str(command["command_id"]), data,
                 evidence_type=evidence_type, mime_type=mime_type,
-                redaction_status="redacted",
+                redaction_status=str((redaction or {}).get("status") or "redacted"),
                 captured_at=datetime.now(timezone.utc).isoformat(),
+                redaction_headers=headers,
             )
             return str(metadata.get("evidence_id") or "") or None
         except ControlPlaneError as exc:

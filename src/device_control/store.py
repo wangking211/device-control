@@ -793,6 +793,10 @@ def register_gateway_manifest(
             if row is None or row["status"] == "revoked":
                 raise hidden()
             gateway = _gateway(row)
+            if manifest.get("tenant_ref") and manifest["tenant_ref"] != tenant:
+                raise conflict("manifest_tenant_binding_mismatch")
+            if manifest.get("gateway_id") and manifest["gateway_id"] != gateway_id:
+                raise conflict("manifest_gateway_binding_mismatch")
             endpoint_id = manifest.get("endpoint_id")
             device_id = manifest.get("device_id")
             fingerprint = manifest.get("device_fingerprint")
@@ -2332,6 +2336,12 @@ def create_evidence(
     task_ref: str | None = None,
     run_ref: str | None = None,
     correlation_id: str | None = None,
+    original_sha256: str | None = None,
+    redaction_processor: str | None = None,
+    redaction_policy_version: str | None = None,
+    redaction_key_id: str | None = None,
+    redaction_proof: str | None = None,
+    redaction_regions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     db = connect()
     try:
@@ -2348,12 +2358,17 @@ def create_evidence(
                 "INSERT INTO device_evidence (evidence_id, tenant_ref, gateway_id, endpoint_id,"
                 " device_id, command_id, task_ref, run_ref, correlation_id, evidence_type,"
                 " mime_type, content_sha256, size_bytes, captured_at, redaction_status,"
+                " original_sha256, redaction_processor, redaction_policy_version,"
+                " redaction_key_id, redaction_proof, redaction_regions_json,"
                 " retention_until, storage_ref, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     evidence_id, tenant, gateway_id, endpoint_id, device_id, command_id,
                     task_ref, run_ref, correlation_id, evidence_type, mime_type,
                     content_sha256, size_bytes, captured_at, redaction_status,
+                    original_sha256, redaction_processor, redaction_policy_version,
+                    redaction_key_id, redaction_proof,
+                    json.dumps(redaction_regions or [], sort_keys=True),
                     retention_until, storage_ref, iso(),
                 ),
             )

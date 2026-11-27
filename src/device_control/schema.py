@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-LATEST_VERSION = 6
+LATEST_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -290,6 +290,8 @@ MIGRATIONS: tuple[Migration, ...] = (    Migration(
             " evidence_type TEXT NOT NULL, mime_type TEXT NOT NULL,"
             " content_sha256 TEXT NOT NULL, size_bytes INTEGER NOT NULL,"
             " captured_at TEXT NOT NULL, redaction_status TEXT NOT NULL,"
+            " original_sha256 TEXT, redaction_processor TEXT, redaction_policy_version TEXT,"
+            " redaction_key_id TEXT, redaction_proof TEXT, redaction_regions_json TEXT,"
             " retention_until TEXT, storage_ref TEXT NOT NULL,"
             " access_policy TEXT NOT NULL DEFAULT 'tenant_command_read',"
             " created_at TEXT NOT NULL, deleted_at TEXT,"
@@ -298,6 +300,14 @@ MIGRATIONS: tuple[Migration, ...] = (    Migration(
             "ON device_evidence(tenant_ref, command_id, created_at)",
             "CREATE INDEX IF NOT EXISTS ix_evidence_retention "
             "ON device_evidence(retention_until, deleted_at)",
+        ),
+    ),
+    Migration(
+        7,
+        "dc010_redaction_proof",
+        (
+            "CREATE INDEX IF NOT EXISTS ix_evidence_redaction "
+            "ON device_evidence(tenant_ref, redaction_status)",
         ),
     ),
 )
@@ -337,6 +347,8 @@ def apply(connection: sqlite3.Connection) -> list[int]:
                 _rebuild_approvals(connection)
             if migration.version == 5:
                 _adopt_dc006(connection)
+            if migration.version == 7:
+                _adopt_dc010(connection)
             connection.execute(
                 "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                 (migration.version, migration.name, now_iso()),
@@ -482,6 +494,21 @@ def _adopt_dc006(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS ix_gateways_manifest "
         "ON device_gateways(tenant_ref, manifest_digest)"
     )
+
+
+def _adopt_dc010(connection: sqlite3.Connection) -> None:
+    existing = _columns(connection, "device_evidence")
+    additions = {
+        "original_sha256": "TEXT",
+        "redaction_processor": "TEXT",
+        "redaction_policy_version": "TEXT",
+        "redaction_key_id": "TEXT",
+        "redaction_proof": "TEXT",
+        "redaction_regions_json": "TEXT",
+    }
+    for column, definition in additions.items():
+        if column not in existing:
+            connection.execute(f"ALTER TABLE device_evidence ADD COLUMN {column} {definition}")
 
 
 def _ensure_indexes(connection: sqlite3.Connection) -> None:

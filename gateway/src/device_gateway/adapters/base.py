@@ -45,6 +45,7 @@ class ActionResult:
     executed: bool = False
     post_state: dict[str, Any] | None = None
     artifact_bytes: bytes | None = None
+    redaction: dict[str, Any] | None = None
 
 
 @runtime_checkable

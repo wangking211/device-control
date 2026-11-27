@@ -29,6 +29,7 @@ from typing import Any, Sequence
 
 from defusedxml import ElementTree as ET
 
+from ..redaction import redact_png
 from .base import ActionResult, AdapterError, AdapterTimeout, AdapterUnavailable
 
 APP_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$")
@@ -47,6 +48,8 @@ class AdbSettings:
     allowed_apps: frozenset[str]
     command_timeout_seconds: float = 15.0
     max_output_bytes: int = MAX_CAPTURE_BYTES
+    redaction_key: str = ""
+    redaction_key_id: str = ""
 
 
 class AndroidAdbAdapter:
@@ -153,20 +156,39 @@ class AndroidAdbAdapter:
         )
         if len(raw) > MAX_SCREENSHOT_BYTES:
             raise AdapterError("screenshot exceeds size cap", error_class="validation")
-        valid_png = raw.startswith(PNG_SIGNATURE) and len(raw) > 64
-        digest = self._hash_bytes(raw)
-        if not valid_png:
-            return ActionResult(status="executed_unverified", executed=True,
-                                output={"screenshot_sha256": digest, "bytes": len(raw)},
-                                reason="invalid_screenshot_format")
+        nodes, quality, _ = self._ui_nodes()
+        redacted, result = redact_png(
+            raw,
+            nodes=nodes,
+            key=self.settings.redaction_key,
+            key_id=self.settings.redaction_key_id,
+            allow_empty_nodes=False,
+        )
+        if redacted is None or result.status != "redacted":
+            return ActionResult(
+                status="executed_unverified", executed=True,
+                output={"redaction_status": result.status,
+                        "redaction_reason": result.reason,
+                        "original_sha256": result.original_sha256,
+                        "ui_quality": quality},
+                reason=f"redaction_{result.status}",
+            )
         return ActionResult(
             status="succeeded",
             executed=True,
-            output={"screenshot_sha256": digest, "bytes": len(raw),
-                    "mime_type": "image/png", "redacted": True},
+            output={
+                "screenshot_sha256": result.output_sha256,
+                "original_sha256": result.original_sha256,
+                "bytes": len(redacted), "mime_type": "image/png",
+                "redacted": True,
+                "redaction_processor": result.processor,
+                "redaction_policy": result.policy_version,
+                "redaction_regions": len(result.regions),
+            },
             verification=self._verification("artifact"),
-            evidence_refs=[f"sha256:{digest}"],
-            artifact_bytes=raw,
+            evidence_refs=[f"sha256:{result.output_sha256}"],
+            artifact_bytes=redacted,
+            redaction=result.metadata(),
         )
 
     def _launch(self, parameters: dict[str, Any]) -> ActionResult:
@@ -351,7 +373,7 @@ class AndroidAdbAdapter:
                 walk(child, depth + 1)
 
         walk(root, 0)
-        quality = "high" if nodes else "low"
+        quality = "low" if len(nodes) >= MAX_NODES else ("high" if nodes else "low")
         return nodes, quality, "uiautomator"
 
     @staticmethod

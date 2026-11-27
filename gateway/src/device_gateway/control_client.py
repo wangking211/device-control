@@ -9,6 +9,8 @@ objects.
 from __future__ import annotations
 
 import json
+import os
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,6 +36,7 @@ class Transport(Protocol):
 class UrllibTransport:
     def __init__(self, timeout_seconds: float = 15.0) -> None:
         self.timeout = timeout_seconds
+        self._ssl_context = _tls_context()
 
     def request(self, method: str, url: str, body: dict[str, Any] | None,
                 headers: dict[str, str], raw: bytes | None = None) -> tuple[int, dict[str, Any]]:
@@ -49,7 +52,9 @@ class UrllibTransport:
         if data is not None and raw is None:
             request.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:  # nosec B310
+            with urllib.request.urlopen(  # nosec B310
+                request, timeout=self.timeout, context=self._ssl_context
+            ) as response:
                 payload = response.read()
                 return response.status, json.loads(payload) if payload else {}
         except urllib.error.HTTPError as exc:
@@ -66,6 +71,21 @@ class UrllibTransport:
 
 def _sha256(data: bytes) -> str:
     return sha256(data).hexdigest()
+
+
+def _tls_context() -> ssl.SSLContext | None:
+    cafile = os.environ.get("DEVICE_GATEWAY_TLS_CA") or None
+    certfile = os.environ.get("DEVICE_GATEWAY_TLS_CERT") or None
+    keyfile = os.environ.get("DEVICE_GATEWAY_TLS_KEY") or None
+    if not (cafile or certfile):
+        return None
+    context = ssl.create_default_context(cafile=cafile)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    if certfile:
+        context.load_cert_chain(certfile=certfile, keyfile=keyfile)
+    return context
 
 
 @dataclass(frozen=True)
@@ -127,7 +147,8 @@ class ControlPlaneClient:
     def upload_evidence(self, command_id: str, data: bytes, *, evidence_type: str,
                         mime_type: str, redaction_status: str,
                         retention_seconds: int | None = None,
-                        captured_at: str | None = None) -> dict[str, Any]:
+                        captured_at: str | None = None,
+                        redaction_headers: dict[str, str] | None = None) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self.credential}",
             "Content-Type": mime_type,
@@ -135,6 +156,9 @@ class ControlPlaneClient:
             "X-Content-SHA256": _sha256(data),
             "X-Redaction-Status": redaction_status,
         }
+        for name, value in (redaction_headers or {}).items():
+            if value:
+                headers[name] = value
         if retention_seconds:
             headers["X-Retention-Seconds"] = str(int(retention_seconds))
         if captured_at:

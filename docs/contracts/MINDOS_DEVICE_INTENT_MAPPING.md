@@ -48,7 +48,11 @@ requested" until the final status.
 - 5xx/transport: retry with the same idempotency key and trace id only.
 - `uncertain`: never retry; reconcile manually or through a new approved action.
 
-`examples/mindos_provider.py` implements this mapping and retry policy. A live
-MindOS deployment was not available in this environment, so the real API call
-and TaskRun E2E remain **BLOCKED**; `examples/mindos_client.py` and the provider
-contract tests are the delivered integration surface.
+`examples/mindos_provider.py` implements this mapping and retry policy. The
+MindOS repository now also contains the product-side connector
+`edge-agent/connectors/device_control_provider.py` (exported from
+`connectors`) with a provider descriptor for the existing registry and tests in
+`tests/test_device_control_provider_dc010.py`. A live MindOS deployment was not
+available in this environment, so actual runtime registration and TaskRun E2E
+remain **BLOCKED**; the adapter/contract tests are the delivered integration
+surface.
