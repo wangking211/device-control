@@ -20,6 +20,7 @@ metadata.
 | DC-009 production guardrails, backup/upgrade/preflight, admin/alerts | Implemented; Docker/TLS/mTLS **BLOCKED** | `scripts/`, `docs/PRODUCTION_READINESS.md` |
 | DC-010 redaction/policy/state/Ed25519/evidence DI | Implemented; live Android/Docker/MindOS **BLOCKED** | `acceptance/DC010_ACCEPTANCE.md` |
 | DC-011 IoT platform integration architecture | Design/contracts/SPI implemented; live platforms **BLOCKED** | `docs/ADR-003-IOT-INTEGRATION.md`, `tests/test_iot_spi.py` |
+| DC-012 Home Assistant pilot | Synthetic E2E implemented; live HA/MindOS **BLOCKED** | `acceptance/DC012_ACCEPTANCE.md`, `tests/test_ha_pilot.py` |
 
 Do not call this production-ready until security, migration, Docker persistence,
 real Android device and MindOS end-to-end criteria in
@@ -81,6 +82,8 @@ from a command envelope. ADB never runs in this FastAPI process.
 - `docs/OPEN_SOURCE_PLATFORM_RESEARCH.md`, `docs/PLATFORM_SELECTION_MATRIX.md` — verified platform facts.
 - `docs/IOT_ADAPTER_SPI.md`, `docs/HOME_ASSISTANT_PILOT.md` — adapter and pilot spec.
 - `acceptance/DC011_ACCEPTANCE.md` — design gate status and blockers.
+- `docs/DC012_BASELINE.md`, `docs/DC012_GAP_ANALYSIS.md` — HA pilot baseline/gaps.
+- `acceptance/DC012_ACCEPTANCE.md` — synthetic pilot PASS and live blockers.
 - `docs/DC010_REBASELINE.md` — real SHAs, interfaces and ownership.
 - `docs/security/SCREENSHOT_REDACTION.md` — redaction pipeline and limits.
 - `docs/MANIFEST_KEY_MANAGEMENT.md` — Ed25519 key generation/rotation.
@@ -95,5 +98,5 @@ python -m ruff check src tests gateway/src gateway/tests scripts
 python -m mypy src/device_control gateway/src/device_gateway --ignore-missing-imports
 ```
 
-114 tests pass on Python 3.12 / Windows (2026-11-27). See
+120 tests pass on Python 3.12 / Windows (2026-11-27). See
 `acceptance/ACCEPTANCE-MATRIX.md` for the exact run and blocked hardware items.

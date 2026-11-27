@@ -74,6 +74,7 @@ class Observation:
     connectivity: str = "unknown"
     quality: str = "medium"
     state_hash: str = ""
+    state_version: str = ""
     native_ref: dict[str, Any] = field(default_factory=dict)
 
 

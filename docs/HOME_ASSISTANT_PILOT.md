@@ -65,6 +65,13 @@ and state; do not replay expired/uncertain non-idempotent commands.
 Non-goals: real locks, alarms, gas valves, medical devices; do not auto-convert
 all entities into executable capabilities; no HA token in MindOS/browser.
 
+## DC-012 implementation status
+
+The synthetic pilot is implemented: platform/device/twin persistence and API,
+REST adapter, claim/read-only default, HA pilot worker over the existing command
+channel, fake-transport E2E. Live HA, WebSocket subscription/reconnect and live
+MindOS TaskRun E2E remain BLOCKED; see `acceptance/DC012_ACCEPTANCE.md`.
+
 ## DC-012 implementation tasks
 
 - Platform/Adapter/Device tables + migrations with consumers.

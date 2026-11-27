@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-LATEST_VERSION = 7
+LATEST_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -308,6 +308,34 @@ MIGRATIONS: tuple[Migration, ...] = (    Migration(
         (
             "CREATE INDEX IF NOT EXISTS ix_evidence_redaction "
             "ON device_evidence(tenant_ref, redaction_status)",
+        ),
+    ),
+    Migration(
+        8,
+        "dc012_home_assistant_pilot",
+        (
+            "CREATE TABLE IF NOT EXISTS platform_instances ("
+            " platform_instance_id TEXT PRIMARY KEY, tenant_ref TEXT NOT NULL,"
+            " adapter_id TEXT NOT NULL, base_url TEXT NOT NULL, secret_ref TEXT NOT NULL,"
+            " platform_version TEXT, gateway_id TEXT NOT NULL, status TEXT NOT NULL,"
+            " health_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,"
+            " updated_at TEXT NOT NULL, UNIQUE(tenant_ref, base_url))",
+            "CREATE TABLE IF NOT EXISTS iot_devices ("
+            " device_id TEXT PRIMARY KEY, tenant_ref TEXT NOT NULL,"
+            " platform_instance_id TEXT NOT NULL, native_platform TEXT NOT NULL,"
+            " native_id TEXT NOT NULL, display_name TEXT NOT NULL, device_type TEXT NOT NULL,"
+            " area TEXT, trust_state TEXT NOT NULL, connectivity_state TEXT NOT NULL,"
+            " endpoint_id TEXT, capabilities_json TEXT NOT NULL, metadata_json TEXT NOT NULL DEFAULT '{}',"
+            " created_at TEXT NOT NULL, updated_at TEXT NOT NULL,"
+            " UNIQUE(tenant_ref, platform_instance_id, native_id))",
+            "CREATE TABLE IF NOT EXISTS iot_twins ("
+            " device_id TEXT PRIMARY KEY, tenant_ref TEXT NOT NULL,"
+            " desired_json TEXT NOT NULL DEFAULT '{}', reported_json TEXT NOT NULL DEFAULT '{}',"
+            " observed_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS ix_platform_instances_tenant "
+            "ON platform_instances(tenant_ref, adapter_id)",
+            "CREATE INDEX IF NOT EXISTS ix_iot_devices_tenant "
+            "ON iot_devices(tenant_ref, trust_state, platform_instance_id)",
         ),
     ),
 )

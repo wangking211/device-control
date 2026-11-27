@@ -204,6 +204,7 @@ class HomeAssistantAdapter:
             connectivity="online" if state not in {"unavailable", "unknown"} else "offline",
             quality="good" if state not in {"unavailable", "unknown"} else "bad",
             state_hash=hashlib.sha256(canonical.encode()).hexdigest(),
+            state_version="v1:" + hashlib.sha256(canonical.encode()).hexdigest()[:16],
             native_ref={"entity_id": native_id},
         )
 

@@ -43,6 +43,7 @@ from device_control.errors import (
     rate_limited,
     unauthenticated,
 )
+from device_control.iot import ha_pilot
 
 app = FastAPI(
     title="Device Control API",
@@ -813,6 +814,202 @@ def consume_approval(
     return store.consume_approval(
         tenant=tenant, approval_id=approval_id, binding=binding,
         actor=principal.subject, actor_type=principal.principal_type,
+    )
+
+
+# ---------------------------------------------------------------------------
+# IoT platform pilot (Home Assistant)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/v1/platform-instances", tags=["iot"], status_code=201)
+def create_platform_instance(
+    payload: dict[str, Any], authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_GATEWAY_WRITE)
+    tenant = _tenant(principal, payload.get("tenant_ref"))
+    required = {"platform_instance_id", "adapter_id", "base_url", "secret_ref"}
+    if required - payload.keys():
+        raise invalid("invalid_platform_instance")
+    if payload["adapter_id"] != "home-assistant":
+        raise invalid("unsupported_adapter")
+    if config.is_production():
+        # DC-012 pilot creation is not enabled in production until the signed
+        # manifest/platform workflow and DC-010 gates are approved.
+        raise dependency_unavailable("platform_pilot_not_enabled_in_production")
+    platform_instance_id = str(payload["platform_instance_id"])
+    gateway_id = f"ha-{platform_instance_id}"
+    document = ha_pilot.manifest_document()
+    digest = manifest_digest(document)
+    created = store.create_gateway(
+        tenant=tenant, gateway_id=gateway_id,
+        display_name=f"Home Assistant {platform_instance_id}",
+        protocol_version="v1",
+        adapter_inventory=[{"adapter_id": "home-assistant", "version": "1.0.0",
+                            "capabilities": list(ha_pilot.CAPABILITY_IDS)}],
+    )
+    activated = store.activate_gateway(
+        gateway_id=gateway_id, enrollment_token=created["enrollment_token"],
+        platform={"adapter": "home-assistant"},
+    )
+    store.register_gateway_manifest(
+        tenant=tenant, gateway_id=gateway_id, manifest=document, digest=digest,
+        signature=None, actor=principal.subject, actor_type=principal.principal_type,
+    )
+    store.heartbeat_gateway(
+        gateway_id=gateway_id, status="online", adapter_inventory=None, version="1.0.0",
+        manifest_digest=digest, manifest_version=str(document["manifest_version"]),
+        endpoint_id=None, device_id=None, device_fingerprint=None, health={"adapter": "home-assistant"},
+    )
+    record = store.create_platform_instance(
+        tenant=tenant, platform_instance_id=platform_instance_id,
+        adapter_id="home-assistant", base_url=str(payload["base_url"]),
+        secret_ref=str(payload["secret_ref"]),
+        platform_version=str(payload.get("platform_version") or ""),
+        gateway_id=gateway_id,
+    )
+    return {**record, "gateway_id": gateway_id,
+            "gateway_credential": activated["credential"]}
+
+
+@app.get("/v1/platform-instances", tags=["iot"])
+def platform_instances(
+    tenant_ref: str | None = None, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_GATEWAY_READ)
+    return {"items": store.list_platform_instances(_tenant(principal, tenant_ref))}
+
+
+@app.get("/v1/platform-instances/{platform_instance_id}", tags=["iot"])
+def platform_instance_detail(
+    platform_instance_id: str, tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_GATEWAY_READ)
+    record = store.get_platform_instance(_tenant(principal, tenant_ref), platform_instance_id)
+    if record is None:
+        raise hidden()
+    return record
+
+
+@app.delete("/v1/platform-instances/{platform_instance_id}", tags=["iot"])
+def disable_platform_instance(
+    platform_instance_id: str, tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    principal = _require_scope(authorization, identity.SCOPE_GATEWAY_WRITE)
+    if not store.disable_platform_instance(_tenant(principal, tenant_ref), platform_instance_id):
+        raise hidden()
+    return {"platform_instance_id": platform_instance_id, "status": "disabled"}
+
+
+@app.post("/v1/platform-instances/{platform_instance_id}/discover", tags=["iot"])
+def sync_platform_devices(
+    platform_instance_id: str,
+    payload: dict[str, Any],
+    tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_ENDPOINT_WRITE)
+    devices = payload.get("devices")
+    if not isinstance(devices, list) or any(not isinstance(item, dict) for item in devices):
+        raise invalid("devices_required")
+    items = store.sync_discovered_devices(
+        tenant=_tenant(principal, tenant_ref), platform_instance_id=platform_instance_id,
+        devices=devices,
+    )
+    return {"items": items, "trust_state": "pending"}
+
+
+@app.get("/v1/iot-devices", tags=["iot"])
+def iot_devices(
+    platform_instance_id: str | None = None,
+    trust_state: str | None = None,
+    tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_ENDPOINT_READ)
+    return {"items": store.list_iot_devices(
+        _tenant(principal, tenant_ref), platform_instance_id=platform_instance_id,
+        trust_state=trust_state,
+    )}
+
+
+@app.get("/v1/iot-devices/{device_id}", tags=["iot"])
+def iot_device_detail(
+    device_id: str, tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_ENDPOINT_READ)
+    device = store.get_iot_device(_tenant(principal, tenant_ref), device_id)
+    if device is None:
+        raise hidden()
+    return device
+
+
+@app.post("/v1/iot-devices/{device_id}/claim", tags=["iot"])
+def claim_iot_device(
+    device_id: str,
+    payload: dict[str, Any] | None = None,
+    tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_ENDPOINT_WRITE)
+    tenant = _tenant(principal, tenant_ref)
+    device = store.get_iot_device(tenant, device_id)
+    if device is None:
+        raise hidden()
+    requested = (payload or {}).get("capability_ids") or list(ha_pilot.READ_CAPABILITIES)
+    if not isinstance(requested, list) or any(not isinstance(item, str) for item in requested):
+        raise invalid("invalid_capability_ids")
+    endpoint_id = f"ep-{device_id.replace(':', '-')}"
+    capabilities = ha_pilot.endpoint_capabilities(set(requested))
+    if not capabilities:
+        raise invalid("no_supported_capabilities")
+    platform = store.get_platform_instance(tenant, device["platform_instance_id"])
+    if platform is None or platform["status"] != "configured":
+        raise conflict("platform_instance_unavailable")
+    store.enroll_endpoint(
+        tenant=tenant, endpoint_id=endpoint_id, node_ref=None,
+        gateway_id=platform["gateway_id"],
+        capabilities=capabilities, device_id=device_id,
+        device_fingerprint=f"ha:{device['native_id']}",
+    )
+    store.heartbeat_endpoint(endpoint_id, status="online", capabilities=capabilities)
+    claimed = store.claim_iot_device(
+        tenant=tenant, device_id=device_id, capability_ids=list(requested),
+        endpoint_id=endpoint_id,
+    )
+    return {**claimed, "endpoint_id": endpoint_id, "capabilities": capabilities}
+
+
+@app.get("/v1/iot-devices/{device_id}/twin", tags=["iot"])
+def iot_device_twin(
+    device_id: str, tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_ENDPOINT_READ)
+    twin = store.get_twin(_tenant(principal, tenant_ref), device_id)
+    if twin is None:
+        raise hidden()
+    return twin
+
+
+@app.post("/v1/iot-devices/{device_id}/twin", tags=["iot"])
+def update_iot_device_twin(
+    device_id: str,
+    payload: dict[str, Any],
+    tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_ENDPOINT_WRITE)
+    tenant = _tenant(principal, tenant_ref)
+    if store.get_iot_device(tenant, device_id) is None:
+        raise hidden()
+    return store.upsert_twin(
+        tenant=tenant, device_id=device_id,
+        desired=payload.get("desired"), reported=payload.get("reported"),
+        observed=payload.get("observed"),
     )
 
 

@@ -62,6 +62,22 @@ Errors use `{"code": "...", "detail": ...}` with the semantics in
 `holder_ref`, `requester_ref`, `approver_ref` and `tenant_ref` are derived
 from verified claims; body values cannot override them.
 
+## IoT platform pilot (Home Assistant)
+
+| Method | Path | Scope |
+| --- | --- | --- |
+| POST/GET | `/v1/platform-instances` | `device.gateway.write` / read |
+| GET/DELETE | `/v1/platform-instances/{id}` | read / write |
+| POST | `/v1/platform-instances/{id}/discover` | `device.endpoint.write` (adapter sync) |
+| GET | `/v1/iot-devices` | `device.endpoint.read` |
+| GET | `/v1/iot-devices/{id}` | `device.endpoint.read` |
+| POST | `/v1/iot-devices/{id}/claim` | `device.endpoint.write`; defaults read-only |
+| GET/POST | `/v1/iot-devices/{id}/twin` | read / write |
+
+Platform creation provisions an internal HA gateway + manifest and returns the
+adapter credential once. Production creation is disabled until the signed
+manifest/DC-010 workflow is approved.
+
 ## Commands, events, audit
 
 | Method | Path | Scope |

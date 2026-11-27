@@ -2309,6 +2309,336 @@ def operation_alerts(tenant: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# IoT platform pilot
+# ---------------------------------------------------------------------------
+
+
+def _platform(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    data = dict(row)
+    data["health"] = _json(data.pop("health_json", "{}"), {})
+    return data
+
+
+def _iot_device(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    data = dict(row)
+    data["capabilities"] = _json(data.pop("capabilities_json", "[]"), [])
+    data["metadata"] = _json(data.pop("metadata_json", "{}"), {})
+    return data
+
+
+def create_platform_instance(*, tenant: str, platform_instance_id: str, adapter_id: str,
+                             base_url: str, secret_ref: str, platform_version: str,
+                             gateway_id: str) -> dict[str, Any]:
+    timestamp = iso()
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            try:
+                tx.execute(
+                    "INSERT INTO platform_instances (platform_instance_id, tenant_ref,"
+                    " adapter_id, base_url, secret_ref, platform_version, gateway_id,"
+                    " status, health_json, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, 'configured', '{}', ?, ?)",
+                    (platform_instance_id, tenant, adapter_id, base_url, secret_ref,
+                     platform_version, gateway_id, timestamp, timestamp),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise conflict("platform_instance_exists") from exc
+            _audit(tx, tenant=tenant, actor=None, actor_type="principal",
+                   action="platform_instance.create", resource_type="platform_instance",
+                   resource_id=platform_instance_id, outcome="allowed",
+                   detail={"adapter_id": adapter_id, "base_url": base_url})
+            _event(tx, tenant=tenant, event_type="platform_instance.created",
+                   aggregate_type="platform_instance", aggregate_id=platform_instance_id,
+                   payload={"adapter_id": adapter_id, "gateway_id": gateway_id})
+    finally:
+        db.close()
+    return get_platform_instance(tenant, platform_instance_id) or {}
+
+
+def get_platform_instance(tenant: str, platform_instance_id: str) -> dict[str, Any] | None:
+    db = connect()
+    try:
+        row = db.execute(
+            "SELECT * FROM platform_instances WHERE platform_instance_id=? AND tenant_ref=?",
+            (platform_instance_id, tenant),
+        ).fetchone()
+    finally:
+        db.close()
+    return _platform(row) if row else None
+
+
+def list_platform_instances(tenant: str) -> list[dict[str, Any]]:
+    db = connect()
+    try:
+        rows = db.execute(
+            "SELECT * FROM platform_instances WHERE tenant_ref=? ORDER BY platform_instance_id",
+            (tenant,),
+        ).fetchall()
+    finally:
+        db.close()
+    return [_platform(row) for row in rows]
+
+
+def set_platform_health(tenant: str, platform_instance_id: str, health: dict[str, Any],
+                        status: str) -> None:
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            tx.execute(
+                "UPDATE platform_instances SET health_json=?, status=?, updated_at=?"
+                " WHERE platform_instance_id=? AND tenant_ref=?",
+                (json.dumps(health, sort_keys=True), status, iso(),
+                 platform_instance_id, tenant),
+            )
+    finally:
+        db.close()
+
+
+def disable_platform_instance(tenant: str, platform_instance_id: str) -> bool:
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            row = tx.execute(
+                "SELECT gateway_id FROM platform_instances WHERE platform_instance_id=?"
+                " AND tenant_ref=?",
+                (platform_instance_id, tenant),
+            ).fetchone()
+            if row is None:
+                return False
+            tx.execute(
+                "UPDATE platform_instances SET status='disabled', updated_at=?"
+                " WHERE platform_instance_id=? AND tenant_ref=?",
+                (iso(), platform_instance_id, tenant),
+            )
+            tx.execute(
+                "UPDATE gateway_credentials SET revoked_at=? WHERE gateway_id=? AND revoked_at IS NULL",
+                (iso(), row["gateway_id"]),
+            )
+            tx.execute(
+                "UPDATE device_gateways SET status='offline' WHERE gateway_id=? AND tenant_ref=?",
+                (row["gateway_id"], tenant),
+            )
+            for device in tx.execute(
+                "SELECT device_id, endpoint_id FROM iot_devices WHERE platform_instance_id=?"
+                " AND tenant_ref=?",
+                (platform_instance_id, tenant),
+            ).fetchall():
+                tx.execute(
+                    "UPDATE iot_devices SET trust_state='pending', connectivity_state='unknown',"
+                    " capabilities_json='[]', updated_at=? WHERE device_id=?",
+                    (iso(), device["device_id"]),
+                )
+                if device["endpoint_id"]:
+                    _invalidate_endpoint_state(
+                        tx, tenant=tenant, endpoint_id=device["endpoint_id"],
+                        reason="platform_instance_disabled",
+                    )
+                    tx.execute(
+                        "UPDATE device_endpoints SET status='offline' WHERE endpoint_id=?"
+                        " AND tenant_ref=? AND status!='revoked'",
+                        (device["endpoint_id"], tenant),
+                    )
+            _audit(tx, tenant=tenant, actor=None, actor_type="principal",
+                   action="platform_instance.disable", resource_type="platform_instance",
+                   resource_id=platform_instance_id, outcome="allowed")
+            _event(tx, tenant=tenant, event_type="platform_instance.disabled",
+                   aggregate_type="platform_instance", aggregate_id=platform_instance_id,
+                   payload={"platform_instance_id": platform_instance_id})
+            return True
+    finally:
+        db.close()
+
+
+def sync_discovered_devices(*, tenant: str, platform_instance_id: str,
+                            devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if get_platform_instance(tenant, platform_instance_id) is None:
+        raise hidden()
+    timestamp = iso()
+    result: list[dict[str, Any]] = []
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            for device in devices:
+                device_id = str(device["device_id"])
+                native_id = str(device["native_id"])
+                capabilities = [item for item in device.get("capabilities", [])
+                                if item.get("capability_id")]
+                tx.execute(
+                    "INSERT INTO iot_devices (device_id, tenant_ref, platform_instance_id,"
+                    " native_platform, native_id, display_name, device_type, area, trust_state,"
+                    " connectivity_state, endpoint_id, capabilities_json, metadata_json,"
+                    " created_at, updated_at)"
+                    " VALUES (?, ?, ?, 'homeassistant', ?, ?, ?, ?, 'pending', 'unknown', NULL,"
+                    " ?, ?, ?, ?)"
+                    " ON CONFLICT(tenant_ref, platform_instance_id, native_id) DO UPDATE SET"
+                    " display_name=excluded.display_name, device_type=excluded.device_type,"
+                    " area=excluded.area, capabilities_json=excluded.capabilities_json,"
+                    " updated_at=excluded.updated_at",
+                    (device_id, tenant, platform_instance_id, native_id,
+                     str(device.get("display_name") or native_id),
+                     str(device.get("device_type") or "entity"), device.get("area"),
+                     json.dumps(capabilities, sort_keys=True),
+                     json.dumps(device.get("metadata") or {}, sort_keys=True),
+                     timestamp, timestamp),
+                )
+                row = tx.execute(
+                    "SELECT * FROM iot_devices WHERE tenant_ref=? AND platform_instance_id=?"
+                    " AND native_id=?", (tenant, platform_instance_id, native_id),
+                ).fetchone()
+                result.append(_iot_device(row))
+            _audit(tx, tenant=tenant, actor=None, actor_type="principal",
+                   action="platform_instance.discover", resource_type="platform_instance",
+                   resource_id=platform_instance_id, outcome="allowed",
+                   detail={"count": len(devices)})
+            _event(tx, tenant=tenant, event_type="iot.devices.discovered",
+                   aggregate_type="platform_instance", aggregate_id=platform_instance_id,
+                   payload={"count": len(devices)})
+    finally:
+        db.close()
+    return result
+
+
+def list_iot_devices(tenant: str, *, platform_instance_id: str | None = None,
+                     trust_state: str | None = None) -> list[dict[str, Any]]:
+    clauses = ["tenant_ref=?"]
+    values: list[Any] = [tenant]
+    if platform_instance_id:
+        clauses.append("platform_instance_id=?")
+        values.append(platform_instance_id)
+    if trust_state:
+        clauses.append("trust_state=?")
+        values.append(trust_state)
+    db = connect()
+    try:
+        rows = db.execute(
+            "SELECT * FROM iot_devices WHERE " + " AND ".join(clauses)  # nosec B608
+            + " ORDER BY device_id", values,
+        ).fetchall()
+    finally:
+        db.close()
+    return [_iot_device(row) for row in rows]
+
+
+def get_iot_device(tenant: str, device_id: str) -> dict[str, Any] | None:
+    db = connect()
+    try:
+        row = db.execute(
+            "SELECT * FROM iot_devices WHERE device_id=? AND tenant_ref=?",
+            (device_id, tenant),
+        ).fetchone()
+    finally:
+        db.close()
+    return _iot_device(row) if row else None
+
+
+def claim_iot_device(*, tenant: str, device_id: str, capability_ids: list[str],
+                     endpoint_id: str | None = None) -> dict[str, Any]:
+    allowed = {item.get("capability_id") for item in
+               (get_iot_device(tenant, device_id) or {}).get("capabilities", [])}
+    requested = set(capability_ids)
+    if not requested:
+        raise invalid("at_least_one_capability_required")
+    if not requested.issubset(allowed):
+        raise conflict("capability_not_discovered")
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            row = tx.execute(
+                "SELECT * FROM iot_devices WHERE device_id=? AND tenant_ref=?",
+                (device_id, tenant),
+            ).fetchone()
+            if row is None:
+                raise hidden()
+            if row["trust_state"] == "revoked":
+                raise conflict("device_revoked")
+            current_caps = json.loads(row["capabilities_json"])
+            kept = [item for item in current_caps
+                    if item.get("capability_id") in requested]
+            tx.execute(
+                "UPDATE iot_devices SET trust_state='claimed', capabilities_json=?,"
+                " endpoint_id=COALESCE(?, endpoint_id), updated_at=? WHERE device_id=?",
+                (json.dumps(kept, sort_keys=True), endpoint_id, iso(), device_id),
+            )
+            _audit(tx, tenant=tenant, actor=None, actor_type="principal",
+                   action="iot_device.claim", resource_type="iot_device", resource_id=device_id,
+                   outcome="allowed", detail={"capabilities": sorted(requested)})
+            _event(tx, tenant=tenant, event_type="iot.device.claimed",
+                   aggregate_type="iot_device", aggregate_id=device_id,
+                   payload={"capabilities": sorted(requested), "endpoint_id": endpoint_id})
+    finally:
+        db.close()
+    return get_iot_device(tenant, device_id) or {}
+
+
+def set_iot_device_endpoint(tenant: str, device_id: str, endpoint_id: str) -> None:
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            tx.execute(
+                "UPDATE iot_devices SET endpoint_id=?, updated_at=? WHERE device_id=?"
+                " AND tenant_ref=?", (endpoint_id, iso(), device_id, tenant),
+            )
+    finally:
+        db.close()
+
+
+def upsert_twin(*, tenant: str, device_id: str, desired: dict[str, Any] | None = None,
+                reported: dict[str, Any] | None = None,
+                observed: dict[str, Any] | None = None) -> dict[str, Any]:
+    device = get_iot_device(tenant, device_id)
+    if device is None:
+        raise hidden()
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            current = tx.execute(
+                "SELECT * FROM iot_twins WHERE device_id=? AND tenant_ref=?",
+                (device_id, tenant),
+            ).fetchone()
+            existing = dict(current) if current else {
+                "desired_json": "{}", "reported_json": "{}", "observed_json": "{}",
+            }
+            tx.execute(
+                "INSERT INTO iot_twins (device_id, tenant_ref, desired_json, reported_json,"
+                " observed_json, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(device_id) DO UPDATE SET desired_json=excluded.desired_json,"
+                " reported_json=excluded.reported_json, observed_json=excluded.observed_json,"
+                " updated_at=excluded.updated_at",
+                (
+                    device_id, tenant,
+                    json.dumps(desired, sort_keys=True) if desired is not None else existing["desired_json"],
+                    json.dumps(reported, sort_keys=True) if reported is not None else existing["reported_json"],
+                    json.dumps(observed, sort_keys=True) if observed is not None else existing["observed_json"],
+                    iso(),
+                ),
+            )
+    finally:
+        db.close()
+    return get_twin(tenant, device_id) or {}
+
+
+def get_twin(tenant: str, device_id: str) -> dict[str, Any] | None:
+    db = connect()
+    try:
+        row = db.execute(
+            "SELECT * FROM iot_twins WHERE device_id=? AND tenant_ref=?",
+            (device_id, tenant),
+        ).fetchone()
+    finally:
+        db.close()
+    if row is None:
+        return None
+    return {
+        "device_id": row["device_id"], "tenant_ref": row["tenant_ref"],
+        "desired": _json(row["desired_json"], {}),
+        "reported": _json(row["reported_json"], {}),
+        "observed": _json(row["observed_json"], {}),
+        "updated_at": row["updated_at"],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Evidence metadata
 # ---------------------------------------------------------------------------
 
