@@ -1,6 +1,6 @@
 # DC-011 Acceptance Matrix
 
-Date: 2026-11-27. Automated suite: **110 passed** (DC-010 102 + 8 IoT SPI
+Date: 2026-11-27. Automated suite: **114 passed** (DC-010 102 + 8 IoT SPI
 tests); Ruff/mypy/Bandit clean locally. No external platform, broker, HA
 instance, Docker or device was used.
 
@@ -22,9 +22,9 @@ instance, Docker or device was used.
 | D11-014 | Tenant/credential isolation | P0 | PARTIAL | design + existing tenant tests; platform secret_ref resolver not implemented |
 | D11-015 | Edge profiles/offline policy | P1 | PARTIAL | documented profiles/rules; no measurements |
 | D11-016 | MQTT ACL/TLS/replay | P1 | PARTIAL | topic/ACL/retained helper + tests; no broker PoC/TLS |
-| D11-017 | Home Assistant pilot spec/fixtures | P1 | PASS (spec) / BLOCKED (live) | `docs/HOME_ASSISTANT_PILOT.md`, fixture and mapping tests; no HA instance |
+| D11-017 | Home Assistant pilot spec/fixtures | P1 | PASS (spec+adapter code) / BLOCKED (live) | `docs/HOME_ASSISTANT_PILOT.md`, `iot/adapters/home_assistant_adapter.py`, `tests/test_home_assistant_adapter.py`; no HA instance |
 | D11-018 | License/SBOM/supply chain | P1 | PARTIAL | manifest license/SBOM/signature fields; SBOM pipeline pending |
-| D11-019 | Contract/compat/fault-injection tests | P1 | PASS (isolated) | SPI contract, timeout/circuit, schema tests; no live platform fault |
+| D11-019 | Contract/compat/fault-injection tests | P1 | PASS (isolated) | SPI + HA adapter fake-transport tests (HTTP 401/service/read-back), timeout/circuit, schema tests; no live platform fault |
 
 ## Gate decision
 

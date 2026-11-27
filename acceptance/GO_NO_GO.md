@@ -13,7 +13,7 @@ real-device/production PASS.
 
 ## What passed
 
-- 110 automated tests (pytest), Ruff, mypy.
+- 114 automated tests (pytest), Ruff, mypy.
 - Bandit 1.9.4 clean; config skips only `B101`; targeted `# nosec` on fixed
   subprocess/parameterized SQL lines.
 - `pip-audit -r requirements/audit.txt`: no known vulnerabilities.

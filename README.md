@@ -95,5 +95,5 @@ python -m ruff check src tests gateway/src gateway/tests scripts
 python -m mypy src/device_control gateway/src/device_gateway --ignore-missing-imports
 ```
 
-110 tests pass on Python 3.12 / Windows (2026-11-27). See
+114 tests pass on Python 3.12 / Windows (2026-11-27). See
 `acceptance/ACCEPTANCE-MATRIX.md` for the exact run and blocked hardware items.

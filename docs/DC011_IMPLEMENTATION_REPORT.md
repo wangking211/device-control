@@ -17,7 +17,10 @@ Delivered:
   breaker and untrusted discovery.
 - `adapter-plugin-manifest.schema.json` with license/SBOM/signature/secret-ref
   rules; canonical device, telemetry and twin JSON Schemas.
-- Home Assistant mapping helper, fixture and pilot specification.
+- Home Assistant adapter implementation (`iot/adapters/home_assistant_adapter.py`)
+  plus mapping helper, fixture and pilot specification. REST discovery/state/
+  service/read-back verification is implemented; WebSocket events are deferred
+  to DC-012.
 - MQTT namespace/ACL/retained-command helper (no broker).
 - Security/edge profile and offline governance docs.
 - DC-011 acceptance matrix.
@@ -25,7 +28,7 @@ Delivered:
 ## Test results
 
 ```
-pytest -q                       110 passed
+pytest -q                       114 passed
 ruff check ...                  All checks passed
 mypy ...                        Success: no issues
 bandit ...                      0 issues
@@ -33,8 +36,9 @@ bandit ...                      0 issues
 
 IoT tests cover manifest validation/signature, literal-secret rejection,
 lifecycle enable/configure/authorize/connect/discover/execute/disable, timeout
-and circuit breaker, HA pending/claim mapping + read-back verification, MQTT
-ACL/retained rules and canonical schemas.
+and circuit breaker, HA pending/claim mapping + read-back verification, HA
+adapter REST discovery/observe/execute (fake transport), MQTT ACL/retained rules
+and canonical schemas.
 
 ## Security decisions
 

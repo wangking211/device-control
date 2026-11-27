@@ -1,0 +1,52 @@
+{
+  "adapter_id": "home-assistant",
+  "display_name": "Home Assistant",
+  "version": "1.0.0",
+  "api_version": "1.0",
+  "publisher": "device-control",
+  "license": "Apache-2.0",
+  "supported_platforms": ["homeassistant"],
+  "supported_platform_versions": ["2026.11"],
+  "supported_features": ["discover", "observe", "execute", "telemetry"],
+  "supported_protocols": ["rest"],
+  "required_permissions": ["states:read", "services:call"],
+  "configuration_schema": {
+    "type": "object",
+    "required": ["endpoint", "secret_refs"],
+    "properties": {
+      "endpoint": {"type": "string"},
+      "secret_refs": {"type": "object"}
+    }
+  },
+  "credential_schema": {"secret_ref": "vault:tenant/home-assistant/token"},
+  "capability_mappings": [
+    {
+      "capability_id": "device.observe",
+      "version": "1.0.0",
+      "native_operation": "GET /api/states/{entity_id}",
+      "risk_tier": "read",
+      "requires_state": false,
+      "idempotent": true,
+      "verification": "read_after_write"
+    },
+    {
+      "capability_id": "light.set_state",
+      "version": "1.0.0",
+      "native_operation": "light.turn_on",
+      "risk_tier": "write",
+      "requires_state": true,
+      "idempotent": false,
+      "verification": "read_after_write"
+    }
+  ],
+  "schema_versions": {"device": "1", "telemetry": "1", "event": "1", "twin": "1"},
+  "health_checks": [{"name": "rest", "timeout_ms": 2000}],
+  "resource_limits": {
+    "cpu": 0.5,
+    "memory_mb": 128,
+    "timeout_seconds": 15,
+    "max_devices": 500,
+    "max_concurrency": 2
+  },
+  "sbom": {"format": "cyclonedx", "ref": "sbom/home-assistant.cdx.json"}
+}
