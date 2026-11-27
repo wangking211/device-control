@@ -1,0 +1,63 @@
+services:
+  home-assistant:
+    image: ghcr.io/home-assistant/home-assistant:2026.11.3
+    restart: unless-stopped
+    volumes:
+      - ./ha-test/config:/config
+    ports:
+      - "8123:8123"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8123/api/', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  device-control:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DEVICE_CONTROL_ENV: ${DEVICE_CONTROL_ENV:-local}
+      DEVICE_CONTROL_DB: /data/device-control.sqlite3
+      DEVICE_CONTROL_EVIDENCE_DIR: /data/evidence
+      DEVICE_CONTROL_ADMIN_TOKEN: ${DEVICE_CONTROL_ADMIN_TOKEN:-local-dev-token-0123456789}
+      MINDOS_IDENTITY_HMAC_KEY: ${MINDOS_IDENTITY_HMAC_KEY:-local-dev-identity-key-0123456789}
+      MINDOS_IDENTITY_ISSUER: ${MINDOS_IDENTITY_ISSUER:-}
+      DEVICE_CONTROL_REDACTION_HMAC_KEY: ${DEVICE_CONTROL_REDACTION_HMAC_KEY:-local-dev-redaction-key-0123456789}
+    ports:
+      - "8085:8085"
+    volumes:
+      - device-control-data:/data
+
+  ha-adapter:
+    profiles: ["ha"]
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile.ha
+    depends_on:
+      device-control:
+        condition: service_started
+      home-assistant:
+        condition: service_healthy
+    environment:
+      DEVICE_CONTROL_URL: http://device-control:8085
+      DEVICE_GATEWAY_ID: ${DEVICE_GATEWAY_ID:-ha-ha-1}
+      DEVICE_GATEWAY_CREDENTIAL: ${DEVICE_GATEWAY_CREDENTIAL:?create platform instance and inject one-time credential}
+      HA_BASE_URL: http://home-assistant:8123
+      HA_TOKEN: ${HA_TOKEN:?create a test HA long-lived token}
+      HA_TOKEN_SECRET: ${HA_TOKEN_SECRET:-vault:ha-test-token}
+      HA_PLATFORM_INSTANCE_ID: ${HA_PLATFORM_INSTANCE_ID:-ha-1}
+      HA_TENANT: ${HA_TENANT:-tenant-a}
+      HA_ALLOWED_ENTITIES: ${HA_ALLOWED_ENTITIES:-light.bed_light,sensor.temperature}
+      DEVICE_ADAPTER_ALLOW_INSECURE_HTTP: "1"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+
+volumes:
+  device-control-data:

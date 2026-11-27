@@ -983,6 +983,54 @@ def claim_iot_device(
     return {**claimed, "endpoint_id": endpoint_id, "capabilities": capabilities}
 
 
+@app.post("/v1/iot-devices/{device_id}/telemetry", tags=["iot"], status_code=201)
+def ingest_iot_telemetry(
+    device_id: str,
+    payload: dict[str, Any],
+    tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_ENDPOINT_WRITE)
+    tenant = _tenant(principal, tenant_ref)
+    device = store.get_iot_device(tenant, device_id)
+    if device is None:
+        raise hidden()
+    if device["trust_state"] not in {"claimed", "trusted"}:
+        raise conflict("device_not_claimed")
+    if not payload.get("metric") or "value" not in payload or not payload.get("observed_at"):
+        raise invalid("metric_value_observed_at_required")
+    record, deduplicated = store.insert_telemetry(
+        tenant=tenant, platform_instance_id=device["platform_instance_id"],
+        device_id=device_id, entity_id=device.get("native_id"), metric=str(payload["metric"]),
+        value=payload["value"], unit=payload.get("unit"), observed_at=str(payload["observed_at"]),
+        source=str(payload.get("source") or "home-assistant"),
+        quality=str(payload.get("quality") or "good"),
+        status=str(payload.get("status") or "ok"),
+    )
+    store.upsert_twin(tenant=tenant, device_id=device_id, observed={
+        "state": payload["value"], "observed_at": payload["observed_at"],
+        "source": payload.get("source") or "home-assistant", "quality": payload.get("quality") or "good",
+    })
+    return {**record, "deduplicated": deduplicated}
+
+
+@app.get("/v1/iot-devices/{device_id}/telemetry", tags=["iot"])
+def query_iot_telemetry(
+    device_id: str,
+    metric: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_ENDPOINT_READ)
+    return {"items": store.list_telemetry(
+        _tenant(principal, tenant_ref), device_id, metric=metric, since=since,
+        until=until, limit=limit,
+    )}
+
+
 @app.get("/v1/iot-devices/{device_id}/twin", tags=["iot"])
 def iot_device_twin(
     device_id: str, tenant_ref: str | None = None,

@@ -2599,6 +2599,10 @@ def upsert_twin(*, tenant: str, device_id: str, desired: dict[str, Any] | None =
             existing = dict(current) if current else {
                 "desired_json": "{}", "reported_json": "{}", "observed_json": "{}",
             }
+            previous_observed = _json(existing["observed_json"], {})
+            next_observed = observed
+            if observed is not None:
+                next_observed = _keep_newer(previous_observed, observed)
             tx.execute(
                 "INSERT INTO iot_twins (device_id, tenant_ref, desired_json, reported_json,"
                 " observed_json, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
@@ -2609,13 +2613,91 @@ def upsert_twin(*, tenant: str, device_id: str, desired: dict[str, Any] | None =
                     device_id, tenant,
                     json.dumps(desired, sort_keys=True) if desired is not None else existing["desired_json"],
                     json.dumps(reported, sort_keys=True) if reported is not None else existing["reported_json"],
-                    json.dumps(observed, sort_keys=True) if observed is not None else existing["observed_json"],
+                    json.dumps(next_observed, sort_keys=True) if next_observed is not None else existing["observed_json"],
                     iso(),
                 ),
             )
     finally:
         db.close()
     return get_twin(tenant, device_id) or {}
+
+
+def _keep_newer(existing: dict[str, Any], incoming: dict[str, Any],
+                *, timestamp_key: str = "observed_at") -> dict[str, Any]:
+    old_ts = str(existing.get(timestamp_key) or "")
+    new_ts = str(incoming.get(timestamp_key) or "")
+    if old_ts and new_ts and new_ts < old_ts:
+        return existing
+    return incoming
+
+
+def insert_telemetry(*, tenant: str, platform_instance_id: str, device_id: str,
+                     entity_id: str | None, metric: str, value: Any, unit: str | None,
+                     observed_at: str, source: str, quality: str, status: str,
+                     schema_version: str = "1") -> tuple[dict[str, Any], bool]:
+    if get_iot_device(tenant, device_id) is None:
+        raise hidden()
+    telemetry_id = f"tel_{secrets.token_urlsafe(18)}"
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            cursor = tx.execute(
+                "INSERT OR IGNORE INTO iot_telemetry (telemetry_id, tenant_ref,"
+                " platform_instance_id, device_id, entity_id, metric, value_json, unit,"
+                " observed_at, received_at, source, quality, status, schema_version)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (telemetry_id, tenant, platform_instance_id, device_id, entity_id, metric,
+                 json.dumps(value, sort_keys=True), unit, observed_at, iso(), source,
+                 quality, status, schema_version),
+            )
+            deduplicated = cursor.rowcount == 0
+            row = tx.execute(
+                "SELECT * FROM iot_telemetry WHERE tenant_ref=? AND device_id=? AND metric=?"
+                " AND observed_at=? AND source=?",
+                (tenant, device_id, metric, observed_at, source),
+            ).fetchone()
+            if row is None:
+                raise invalid("telemetry_insert_failed")
+            result = dict(row)
+            result["value"] = _json(result.pop("value_json"), None)
+            if not deduplicated:
+                _event(tx, tenant=tenant, event_type="iot.telemetry.received",
+                       aggregate_type="iot_device", aggregate_id=device_id,
+                       payload={"metric": metric, "observed_at": observed_at})
+            return result, deduplicated
+    finally:
+        db.close()
+
+
+def list_telemetry(tenant: str, device_id: str, *, metric: str | None = None,
+                   since: str | None = None, until: str | None = None,
+                   limit: int | None = None) -> list[dict[str, Any]]:
+    clauses = ["tenant_ref=?", "device_id=?"]
+    values: list[Any] = [tenant, device_id]
+    if metric:
+        clauses.append("metric=?")
+        values.append(metric)
+    if since:
+        clauses.append("observed_at>=?")
+        values.append(since)
+    if until:
+        clauses.append("observed_at<=?")
+        values.append(until)
+    values.append(_list_limit(limit))
+    db = connect()
+    try:
+        rows = db.execute(
+            "SELECT * FROM iot_telemetry WHERE " + " AND ".join(clauses)  # nosec B608
+            + " ORDER BY observed_at DESC LIMIT ?", values,
+        ).fetchall()
+    finally:
+        db.close()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["value"] = _json(item.pop("value_json"), None)
+        result.append(item)
+    return result
 
 
 def get_twin(tenant: str, device_id: str) -> dict[str, Any] | None:

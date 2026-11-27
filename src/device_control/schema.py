@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-LATEST_VERSION = 8
+LATEST_VERSION = 9
 
 
 @dataclass(frozen=True)
@@ -313,8 +313,7 @@ MIGRATIONS: tuple[Migration, ...] = (    Migration(
     Migration(
         8,
         "dc012_home_assistant_pilot",
-        (
-            "CREATE TABLE IF NOT EXISTS platform_instances ("
+        (            "CREATE TABLE IF NOT EXISTS platform_instances ("
             " platform_instance_id TEXT PRIMARY KEY, tenant_ref TEXT NOT NULL,"
             " adapter_id TEXT NOT NULL, base_url TEXT NOT NULL, secret_ref TEXT NOT NULL,"
             " platform_version TEXT, gateway_id TEXT NOT NULL, status TEXT NOT NULL,"
@@ -336,6 +335,22 @@ MIGRATIONS: tuple[Migration, ...] = (    Migration(
             "ON platform_instances(tenant_ref, adapter_id)",
             "CREATE INDEX IF NOT EXISTS ix_iot_devices_tenant "
             "ON iot_devices(tenant_ref, trust_state, platform_instance_id)",
+        ),
+    ),
+    Migration(
+        9,
+        "dc013_iot_telemetry",
+        (
+            "CREATE TABLE IF NOT EXISTS iot_telemetry ("
+            " telemetry_id TEXT PRIMARY KEY, tenant_ref TEXT NOT NULL,"
+            " platform_instance_id TEXT NOT NULL, device_id TEXT NOT NULL,"
+            " entity_id TEXT, metric TEXT NOT NULL, value_json TEXT NOT NULL,"
+            " unit TEXT, observed_at TEXT NOT NULL, received_at TEXT NOT NULL,"
+            " source TEXT NOT NULL, quality TEXT NOT NULL, status TEXT NOT NULL,"
+            " schema_version TEXT NOT NULL DEFAULT '1',"
+            " UNIQUE(tenant_ref, device_id, metric, observed_at, source))",
+            "CREATE INDEX IF NOT EXISTS ix_iot_telemetry_device_time "
+            "ON iot_telemetry(tenant_ref, device_id, metric, observed_at)",
         ),
     ),
 )

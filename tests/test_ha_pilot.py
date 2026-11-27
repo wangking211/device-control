@@ -1,4 +1,6 @@
 
+from datetime import datetime, timedelta, timezone
+
 from device_gateway.control_client import ControlPlaneClient
 from fastapi.testclient import TestClient
 from support import (
@@ -16,6 +18,7 @@ from device_control import store
 from device_control.app import app
 from device_control.iot.adapters.home_assistant_adapter import HomeAssistantAdapter
 from device_control.iot.adapters.worker import HomeAssistantPilotWorker
+from device_control.iot.spi import PlatformConfig
 
 client = TestClient(app)
 TOKEN = "ha-long-lived-token-0123456789"
@@ -36,9 +39,14 @@ STATES = {
 class FakeHA:
     def __init__(self):
         self.state = {key: dict(value) for key, value in STATES.items()}
+        now = datetime.now(timezone.utc).isoformat()
+        for item in self.state.values():
+            item["last_updated"] = now
         self.service_changes = True
+        self.calls = []
 
     def request(self, method, url, headers, body=None):
+        self.calls.append((method, url, headers, body))
         if method == "GET" and url.endswith("/api/"):
             return 200, {"message": "API running."}
         if method == "GET" and url.endswith("/api/states"):
@@ -54,6 +62,109 @@ class FakeHA:
 
 
 class InProcessTransport:
+    def request(self, method, url, body, headers, raw=None):
+        path = "/" + url.split("://", 1)[-1].split("/", 1)[1]
+        response = client.request(method, path, json=body, headers=headers)
+        return response.status_code, response.json()
+
+
+def _config(endpoint="https://ha.example"):
+    return PlatformConfig(
+        platform_instance_id="ha-1", tenant_id="tenant-a", adapter_id="home-assistant",
+        endpoint=endpoint, platform_version="2026.11",
+        secret_refs={"token": "vault:ha-token"},
+    )
+
+
+class StubControl:
+    gateway_id = "ha-ha-1"
+
+    def __init__(self, commands):
+        self.commands = commands
+        self.results = []
+        self.progresses = []
+
+    def pull(self, limit=10):
+        return list(self.commands)
+
+    def progress(self, command_id, status):
+        self.progresses.append((command_id, status))
+        return {}
+
+    def result(self, command_id, payload):
+        self.results.append((command_id, payload))
+        return {}
+
+
+def worker_command(**overrides):
+    payload = {
+        "command_id": "cmd-ha-1", "gateway_id": "ha-ha-1", "tenant_ref": "tenant-a",
+        "endpoint_id": "ep-ha", "device_id": "ha:tenant-a:light:kitchen",
+        "capability_id": "light.turn_on", "capability_version": "1.0.0",
+        "operation": "turn_on", "parameters": {"entity_id": "light.kitchen",
+                                               "expected_state": "on"},
+        "state_hash": None, "state_version": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_worker_write_requires_state_mapping_and_freshness_without_side_effect():
+    fake = FakeHA()
+    adapter = HomeAssistantAdapter(transport=fake)
+    adapter.connect(_config(), lambda ref: TOKEN)
+    control = StubControl([worker_command()])
+    worker = HomeAssistantPilotWorker(
+        client=control, adapter=adapter, allowed_entities={"light.kitchen"},
+        entity_bindings={"light.kitchen": {"endpoint_id": "ep-ha",
+                                           "device_id": "ha:tenant-a:light:kitchen",
+                                           "platform_instance_id": "ha-1"}},
+        platform_instance_id="ha-1",
+    )
+    worker.run_once()
+    assert control.results[0][1]["status"] == "rejected"
+    assert control.results[0][1]["reason"] == "state_prerequisite_missing"
+    assert not any(call[0] == "POST" for call in fake.calls)
+
+    observed = adapter.observe("light.kitchen")
+    control = StubControl([worker_command(state_hash=observed.state_hash,
+                                          state_version=observed.state_version,
+                                          endpoint_id="other-endpoint")])
+    worker = HomeAssistantPilotWorker(
+        client=control, adapter=adapter, allowed_entities={"light.kitchen"},
+        entity_bindings={"light.kitchen": {"endpoint_id": "ep-ha",
+                                           "device_id": "ha:tenant-a:light:kitchen",
+                                           "platform_instance_id": "ha-1"}},
+        platform_instance_id="ha-1",
+    )
+    worker.run_once()
+    assert control.results[0][1]["reason"] == "endpoint_mapping_mismatch"
+    assert not any(call[0] == "POST" for call in fake.calls)
+
+
+def test_worker_rejects_stale_state_before_service_call():
+    fake = FakeHA()
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    for item in fake.state.values():
+        item["last_updated"] = stale
+    adapter = HomeAssistantAdapter(transport=fake)
+    adapter.connect(_config(), lambda ref: TOKEN)
+    observed = adapter.observe("light.kitchen")
+    control = StubControl([worker_command(
+        state_hash=observed.state_hash, state_version=observed.state_version,
+        endpoint_id="ep-ha",
+    )])
+    worker = HomeAssistantPilotWorker(
+        client=control, adapter=adapter, allowed_entities={"light.kitchen"},
+        entity_bindings={"light.kitchen": {"endpoint_id": "ep-ha",
+                                           "device_id": "ha:tenant-a:light:kitchen",
+                                           "platform_instance_id": "ha-1"}},
+        platform_instance_id="ha-1",
+    )
+    worker.run_once()
+    assert control.results[0][1]["reason"] == "state_stale"
+    assert not any(call[0] == "POST" for call in fake.calls)
+
     def request(self, method, url, body, headers, raw=None):
         path = "/" + url.split("://", 1)[-1].split("/", 1)[1]
         response = client.request(method, path, json=body, headers=headers)
@@ -123,13 +234,7 @@ def test_home_assistant_pilot_command_executes_and_verifies(tmp_path, monkeypatc
 
     fake = FakeHA()
     adapter = HomeAssistantAdapter(transport=fake)
-    adapter.connect(
-        type("C", (), {"platform_instance_id": "ha-1", "tenant_id": "tenant-a",
-                        "adapter_id": "home-assistant", "endpoint": "https://ha.example",
-                        "platform_version": "2026.11", "secret_refs": {"token": "vault:ha-token"},
-                        "settings": {}})(),
-        lambda ref: TOKEN,
-    )
+    adapter.connect(_config(), lambda ref: TOKEN)
     observed = adapter.observe("light.kitchen")
     agent = agent_token()
     lease = acquire_lease(client, agent, endpoint_id=claimed["endpoint_id"])
@@ -193,6 +298,43 @@ def test_unclaimed_device_has_no_endpoint_and_twin_is_separate(tmp_path, monkeyp
     assert twin["desired"]["state"] == "on"
     assert twin["reported"]["state"] == "off"
     assert twin["observed"]["source"] == "ha"
+
+
+def test_telemetry_is_idempotent_and_late_data_does_not_rollback_twin(tmp_path, monkeypatch):
+    configure(monkeypatch, tmp_path)
+    client.post("/v1/platform-instances", json=platform_payload(),
+                headers=bearer(admin_token()))
+    client.post("/v1/platform-instances/ha-1/discover", json={"devices": [
+        {"device_id": "ha:tenant-a:sensor:living-room-temperature",
+         "native_id": "sensor.living_room_temperature",
+         "display_name": "Living Room Temperature", "device_type": "sensor",
+         "capabilities": [{"capability_id": "device.observe"}]},
+    ]}, headers=bearer(admin_token()))
+    client.post("/v1/iot-devices/ha:tenant-a:sensor:living-room-temperature/claim",
+                json={}, headers=bearer(admin_token()))
+    first = {
+        "metric": "temperature", "value": 21.5, "unit": "C",
+        "observed_at": "2026-11-27T10:00:00+00:00", "source": "home-assistant",
+    }
+    created = client.post("/v1/iot-devices/ha:tenant-a:sensor:living-room-temperature/telemetry",
+                          json=first, headers=bearer(admin_token()))
+    assert created.status_code == 201, created.text
+    duplicate = client.post("/v1/iot-devices/ha:tenant-a:sensor:living-room-temperature/telemetry",
+                            json=first, headers=bearer(admin_token())).json()
+    assert duplicate["deduplicated"] is True
+    newer = {**first, "value": 22.0, "observed_at": "2026-11-27T10:05:00+00:00"}
+    client.post("/v1/iot-devices/ha:tenant-a:sensor:living-room-temperature/telemetry",
+                json=newer, headers=bearer(admin_token()))
+    late = {**first, "value": 99.0, "observed_at": "2026-11-27T09:00:00+00:00"}
+    client.post("/v1/iot-devices/ha:tenant-a:sensor:living-room-temperature/telemetry",
+                json=late, headers=bearer(admin_token()))
+    twin = client.get("/v1/iot-devices/ha:tenant-a:sensor:living-room-temperature/twin",
+                      headers=bearer(admin_token())).json()
+    assert twin["observed"]["state"] == 22.0
+    items = client.get("/v1/iot-devices/ha:tenant-a:sensor:living-room-temperature/telemetry",
+                       headers=bearer(admin_token())).json()["items"]
+    assert len(items) == 3
+    assert items[0]["observed_at"] == "2026-11-27T10:05:00+00:00"
 
 
 def test_platform_disable_revokes_adapter_and_resets_devices(tmp_path, monkeypatch):

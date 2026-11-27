@@ -32,6 +32,9 @@ class HomeAssistantPilotWorker:
     client: ControlClient
     adapter: HomeAssistantAdapter
     allowed_entities: set[str]
+    entity_bindings: dict[str, dict[str, Any]] | None = None
+    platform_instance_id: str | None = None
+    max_state_age_seconds: float = 15.0
 
     def run_once(self, limit: int = 10) -> dict[str, int]:
         commands = self.client.pull(limit)
@@ -55,16 +58,29 @@ class HomeAssistantPilotWorker:
         if command.get("gateway_id") != self.client.gateway_id:  # type: ignore[attr-defined]
             self._reject(command_id, "gateway_mismatch")
             return
+        binding = (self.entity_bindings or {}).get(entity_id)
+        if self.entity_bindings is not None and binding is None:
+            self._reject(command_id, "entity_mapping_missing")
+            return
+        if binding:
+            if command.get("endpoint_id") and command["endpoint_id"] != binding.get("endpoint_id"):
+                self._reject(command_id, "endpoint_mapping_mismatch")
+                return
+            if command.get("device_id") and command["device_id"] != binding.get("device_id"):
+                self._reject(command_id, "device_mapping_mismatch")
+                return
+            if self.platform_instance_id and binding.get("platform_instance_id") != self.platform_instance_id:
+                self._reject(command_id, "platform_instance_mismatch")
+                return
         try:
             before = self.adapter.observe(entity_id)
         except Exception as exc:  # noqa: BLE001 - adapter/transport failure
             self._result(command_id, status="failed", reason=type(exc).__name__,
                          error_class="unavailable")
             return
-        if command.get("state_hash") and before.state_hash != command["state_hash"]:
-            self._result(command_id, status="rejected", reason="state_changed",
-                         error_class="state_changed")
-            return
+        if capability_id not in ha_pilot.READ_CAPABILITIES:
+            if not self._check_write_state(command, before):
+                return
         if capability_id in ha_pilot.READ_CAPABILITIES:
             self._result(
                 command_id, status="succeeded",
@@ -97,6 +113,33 @@ class HomeAssistantPilotWorker:
             verification=self._verification(observed, "read_after_write"),
             output={"state": observed.properties.get("state") if observed else None},
         )
+
+    def _check_write_state(self, command: dict[str, Any], before: Any) -> bool:
+        state_hash = command.get("state_hash")
+        state_version = command.get("state_version")
+        if not state_hash or not state_version:
+            self._reject(str(command["command_id"]), "state_prerequisite_missing")
+            return False
+        if before.state_hash != state_hash or before.state_version != state_version:
+            self._reject(str(command["command_id"]), "state_changed")
+            return False
+        if before.quality != "good" or before.connectivity != "online":
+            self._reject(str(command["command_id"]), "state_unavailable")
+            return False
+        try:
+            observed = datetime.fromisoformat(str(before.observed_at).replace("Z", "+00:00"))
+        except ValueError:
+            self._reject(str(command["command_id"]), "state_observed_at_invalid")
+            return False
+        if observed.tzinfo is None:
+            self._reject(str(command["command_id"]), "state_observed_at_invalid")
+            return False
+        now = datetime.now(timezone.utc)
+        age = (now - observed).total_seconds()
+        if age < -60 or age > self.max_state_age_seconds:
+            self._reject(str(command["command_id"]), "state_stale")
+            return False
+        return True
 
     def _reject(self, command_id: str, reason: str) -> None:
         self._result(command_id, status="rejected", reason=reason, error_class="policy")

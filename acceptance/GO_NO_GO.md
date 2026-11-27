@@ -13,7 +13,7 @@ real-device/production PASS.
 
 ## What passed
 
-- 120 automated tests (pytest), Ruff, mypy.
+- 126 automated tests (pytest), Ruff, mypy.
 - Bandit 1.9.4 clean; config skips only `B101`; targeted `# nosec` on fixed
   subprocess/parameterized SQL lines.
 - `pip-audit -r requirements/audit.txt`: no known vulnerabilities.
@@ -39,6 +39,10 @@ real-device/production PASS.
   over the existing command channel, pending/claim/read-only default, write
   allowlist, read-back verification and synthetic light/sensor E2E. Live HA,
   WebSocket, MindOS runtime and production gates remain BLOCKED.
+- DC-013: Pillow 13 security remediation (42 advisories), Bandit review, HA
+  worker mandatory state/mapping/freshness checks, WebSocket primitives,
+  telemetry/twin persistence, Docker+HA runbook and non-root worker image.
+  Local tests/scanners pass; remote CI/Docker/live HA/MindOS/Android BLOCKED.
 
 ## Blocking rows (must be executed before GO)
 
@@ -55,6 +59,8 @@ real-device/production PASS.
 | C | MindOS live Provider registration/TaskRun approval/evidence loop | BLOCKED |
 | IoT | Home Assistant live discovery/command/reconnect/approval E2E | BLOCKED |
 | IoT | HA WebSocket events/reconnect and MindOS live TaskRun E2E | BLOCKED |
+| IoT | Docker + real Home Assistant REST/WS E2E | BLOCKED |
+| IoT | Android controlled live E2E | BLOCKED |
 | IoT | MQTT broker TLS/ACL/replay PoC and real telemetry pipeline | BLOCKED |
 | IoT | Platform/Adapter/Device/Twin persistence and unified endpoints | DC-012 |
 | IoT | SBOM/vulnerability pipeline and license approval for ThingsBoard 4.4 | PENDING |

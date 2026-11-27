@@ -73,6 +73,12 @@ from verified claims; body values cannot override them.
 | GET | `/v1/iot-devices/{id}` | `device.endpoint.read` |
 | POST | `/v1/iot-devices/{id}/claim` | `device.endpoint.write`; defaults read-only |
 | GET/POST | `/v1/iot-devices/{id}/twin` | read / write |
+| GET/POST | `/v1/iot-devices/{id}/telemetry` | read / `device.endpoint.write` |
+
+Telemetry is deduplicated by `(tenant, device, metric, observed_at, source)`;
+late telemetry is retained but cannot roll back a newer twin observed state.
+Worker writes require fresh state hash/version, entity/endpoint/device binding
+and explicit capability authorization.
 
 Platform creation provisions an internal HA gateway + manifest and returns the
 adapter credential once. Production creation is disabled until the signed
