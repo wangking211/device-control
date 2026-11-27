@@ -1,4 +1,4 @@
-# Go / No-Go — DC-006…DC-010
+# Go / No-Go — DC-006…DC-011
 
 Date: 2026-11-27
 Baseline: `718746005827f8a371f10f631951d07dc38342aa`
@@ -13,7 +13,7 @@ real-device/production PASS.
 
 ## What passed
 
-- 102 automated tests (pytest), Ruff, mypy.
+- 110 automated tests (pytest), Ruff, mypy.
 - Bandit 1.9.4 clean; config skips only `B101`; targeted `# nosec` on fixed
   subprocess/parameterized SQL lines.
 - `pip-audit -r requirements/audit.txt`: no known vulnerabilities.
@@ -31,6 +31,10 @@ real-device/production PASS.
   freshness/uniqueness/quality checks; evidence storage DI + foundation-storage
   adapter; restore dry-run tool; OpenAPI constraints and dev-only compose HTTP;
   MindOS Device Control provider module/descriptor and contract tests.
+- DC-011: baseline/research/selection matrix, ADR-003 boundary, adapter SPI and
+  lifecycle/timeout/circuit, plugin manifest with license/SBOM/signature,
+  canonical device/telemetry/twin contracts, HA pilot mapping/fixture, MQTT
+  namespace/ACL helper. Design gate PASS; live platforms remain BLOCKED.
 
 ## Blocking rows (must be executed before GO)
 
@@ -45,6 +49,10 @@ real-device/production PASS.
 | D | Backup/restore drill with RPO/RTO on production-like volumes | BLOCKED |
 | A | Real Android structural redaction evidence on password/OTP/payment screens | BLOCKED |
 | C | MindOS live Provider registration/TaskRun approval/evidence loop | BLOCKED |
+| IoT | Home Assistant live discovery/command/reconnect/approval E2E | BLOCKED |
+| IoT | MQTT broker TLS/ACL/replay PoC and real telemetry pipeline | BLOCKED |
+| IoT | Platform/Adapter/Device/Twin persistence and unified endpoints | DC-012 |
+| IoT | SBOM/vulnerability pipeline and license approval for ThingsBoard 4.4 | PENDING |
 
 ## Next execution steps
 

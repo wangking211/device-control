@@ -1,0 +1,24 @@
+{
+  "light": {
+    "entity_id": "light.kitchen",
+    "state": "off",
+    "attributes": {
+      "friendly_name": "Kitchen Light",
+      "brightness": 0,
+      "supported_color_modes": ["brightness"]
+    },
+    "last_changed": "2026-11-27T08:00:00+00:00",
+    "last_updated": "2026-11-27T08:00:00+00:00"
+  },
+  "sensor": {
+    "entity_id": "sensor.living_room_temperature",
+    "state": "21.5",
+    "attributes": {
+      "friendly_name": "Living Room Temperature",
+      "unit_of_measurement": "°C",
+      "device_class": "temperature"
+    },
+    "last_changed": "2026-11-27T08:00:00+00:00",
+    "last_updated": "2026-11-27T08:00:00+00:00"
+  }
+}

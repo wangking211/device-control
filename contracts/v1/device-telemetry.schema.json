@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/device-telemetry.v1.schema.json",
+  "title": "IoT Telemetry Point",
+  "description": "Telemetry is observational input, never by itself a safety interlock or approval basis.",
+  "type": "object",
+  "required": [
+    "telemetry_id", "tenant_id", "device_id", "metric", "value", "quality",
+    "source_timestamp", "ingest_timestamp", "sequence", "source_adapter", "schema_version"
+  ],
+  "properties": {
+    "telemetry_id": {"type": "string", "minLength": 1},
+    "tenant_id": {"type": "string", "minLength": 1},
+    "device_id": {"type": "string", "minLength": 1},
+    "endpoint_id": {"type": ["string", "null"]},
+    "metric": {"type": "string", "minLength": 1},
+    "value": {},
+    "unit": {"type": ["string", "null"]},
+    "quality": {"enum": ["good", "uncertain", "bad", "stale"]},
+    "source_timestamp": {"type": "string", "format": "date-time"},
+    "ingest_timestamp": {"type": "string", "format": "date-time"},
+    "sequence": {"type": ["integer", "null"]},
+    "source_adapter": {"type": "string", "minLength": 1},
+    "schema_version": {"const": "1"},
+    "metadata": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}

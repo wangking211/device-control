@@ -19,6 +19,8 @@ exports:
     - device-gateway-protocol
     - device-command-execution
     - device-evidence-metadata
+    - iot-adapter-spi
+    - iot-canonical-device-model
 agents: []
 skills: []
 interfaces:

@@ -24,6 +24,10 @@ monorepo path dependency.
 | `gateway-command-result.schema.json` | execution result/verification |
 | `device-event.schema.json` | transactional outbox envelope |
 | `device-manifest.schema.json` | trusted capability/risk/verification manifest |
+| `adapter-plugin-manifest.schema.json` | adapter provenance/SBOM/resource limits |
+| `canonical-device.schema.json` | canonical platform/device/native mapping |
+| `device-telemetry.schema.json` | telemetry point |
+| `device-twin.schema.json` | desired/reported/observed twin |
 
 ## Rules
 

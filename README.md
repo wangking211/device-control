@@ -18,6 +18,8 @@ metadata.
 | DC-007 Accessibility state, Evidence service, diagnostics | Implemented; real device/durable object store **BLOCKED** | `tests/test_evidence.py`, `docs/EVIDENCE_STORE.md` |
 | DC-008 OpenAPI, MindOS provider and contract mapping | Implemented; live MindOS E2E **BLOCKED** | `contracts/openapi-v1.json`, `examples/mindos_provider.py`, `tests/test_mindos_contract.py` |
 | DC-009 production guardrails, backup/upgrade/preflight, admin/alerts | Implemented; Docker/TLS/mTLS **BLOCKED** | `scripts/`, `docs/PRODUCTION_READINESS.md` |
+| DC-010 redaction/policy/state/Ed25519/evidence DI | Implemented; live Android/Docker/MindOS **BLOCKED** | `acceptance/DC010_ACCEPTANCE.md` |
+| DC-011 IoT platform integration architecture | Design/contracts/SPI implemented; live platforms **BLOCKED** | `docs/ADR-003-IOT-INTEGRATION.md`, `tests/test_iot_spi.py` |
 
 Do not call this production-ready until security, migration, Docker persistence,
 real Android device and MindOS end-to-end criteria in
@@ -75,6 +77,10 @@ from a command envelope. ADB never runs in this FastAPI process.
 - `docs/contracts/MINDOS_DEVICE_INTENT_MAPPING.md` — MindOS field/status/error mapping.
 - `docs/BASELINE_AUDIT.md` — DC-006…DC-009 baseline audit and blockers.
 - `acceptance/DC010_ACCEPTANCE.md` — DC-010 P0/P1 matrix and NO-GO blockers.
+- `docs/DC011_BASELINE.md`, `docs/ADR-003-IOT-INTEGRATION.md` — IoT platform boundary.
+- `docs/OPEN_SOURCE_PLATFORM_RESEARCH.md`, `docs/PLATFORM_SELECTION_MATRIX.md` — verified platform facts.
+- `docs/IOT_ADAPTER_SPI.md`, `docs/HOME_ASSISTANT_PILOT.md` — adapter and pilot spec.
+- `acceptance/DC011_ACCEPTANCE.md` — design gate status and blockers.
 - `docs/DC010_REBASELINE.md` — real SHAs, interfaces and ownership.
 - `docs/security/SCREENSHOT_REDACTION.md` — redaction pipeline and limits.
 - `docs/MANIFEST_KEY_MANAGEMENT.md` — Ed25519 key generation/rotation.
@@ -89,5 +95,5 @@ python -m ruff check src tests gateway/src gateway/tests scripts
 python -m mypy src/device_control gateway/src/device_gateway --ignore-missing-imports
 ```
 
-102 tests pass on Python 3.12 / Windows (2026-11-27). See
+110 tests pass on Python 3.12 / Windows (2026-11-27). See
 `acceptance/ACCEPTANCE-MATRIX.md` for the exact run and blocked hardware items.

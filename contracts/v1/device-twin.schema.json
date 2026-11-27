@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/device-twin.v1.schema.json",
+  "title": "IoT Device Twin",
+  "description": "Desired, reported and observed states are separate; last-write-wins must not overwrite safety state.",
+  "type": "object",
+  "required": ["device_id", "tenant_id", "schema_version", "desired", "reported", "observed"],
+  "properties": {
+    "device_id": {"type": "string", "minLength": 1},
+    "tenant_id": {"type": "string", "minLength": 1},
+    "schema_version": {"const": "1"},
+    "desired": {
+      "type": "object",
+      "required": ["version", "updated_at", "source"],
+      "properties": {
+        "version": {"type": "integer", "minimum": 0},
+        "updated_at": {"type": "string", "format": "date-time"},
+        "source": {"type": "string"},
+        "state": {"type": "object"},
+        "expires_at": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "reported": {
+      "type": "object",
+      "required": ["version", "updated_at", "source", "quality"],
+      "properties": {
+        "version": {"type": "integer", "minimum": 0},
+        "updated_at": {"type": "string", "format": "date-time"},
+        "source": {"type": "string"},
+        "quality": {"enum": ["good", "uncertain", "bad", "stale"]},
+        "state": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "observed": {
+      "type": "object",
+      "required": ["version", "observed_at", "source", "quality"],
+      "properties": {
+        "version": {"type": "integer", "minimum": 0},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "source": {"type": "string"},
+        "quality": {"enum": ["good", "uncertain", "bad", "stale"]},
+        "state_hash": {"type": "string"},
+        "state": {"type": "object"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

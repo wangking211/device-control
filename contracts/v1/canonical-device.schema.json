@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/canonical-device.v1.schema.json",
+  "title": "Canonical IoT Device",
+  "description": "Device Control is the domain source of truth; native platform ids remain separate mappings.",
+  "type": "object",
+  "required": [
+    "device_id", "tenant_id", "platform_instance_id", "native_platform", "native_id",
+    "display_name", "device_type", "connectivity_state", "trust_state",
+    "schema_version", "created_at", "updated_at"
+  ],
+  "properties": {
+    "device_id": {"type": "string", "minLength": 1},
+    "tenant_id": {"type": "string", "minLength": 1},
+    "platform_instance_id": {"type": "string", "minLength": 1},
+    "native_platform": {"type": "string", "minLength": 1},
+    "native_id": {"type": "string", "minLength": 1},
+    "display_name": {"type": "string", "minLength": 1},
+    "device_type": {"type": "string", "minLength": 1},
+    "gateway_id": {"type": ["string", "null"]},
+    "endpoint_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "connectivity_state": {"enum": ["online", "offline", "degraded", "unknown"]},
+    "trust_state": {"enum": ["pending", "claimed", "trusted", "revoked"]},
+    "last_seen_at": {"type": ["string", "null"], "format": "date-time"},
+    "location": {"type": ["string", "null"]},
+    "schema_version": {"const": "1"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "native_mapping": {
+      "type": "object",
+      "properties": {
+        "native_platform": {"type": "string"},
+        "native_id": {"type": "string"},
+        "native_area": {"type": ["string", "null"]},
+        "conflict_policy": {"enum": ["reject", "prefer_device_control", "prefer_native"]}
+      },
+      "additionalProperties": false
+    },
+    "metadata": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}

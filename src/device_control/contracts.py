@@ -34,6 +34,10 @@ SCHEMAS: dict[str, str] = {
     "gateway_command_result": "gateway-command-result.schema.json",
     "event": "device-event.schema.json",
     "manifest": "device-manifest.schema.json",
+    "adapter_manifest": "adapter-plugin-manifest.schema.json",
+    "canonical_device": "canonical-device.schema.json",
+    "telemetry": "device-telemetry.schema.json",
+    "twin": "device-twin.schema.json",
 }
 
 

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/adapter-plugin-manifest.v1.schema.json",
+  "title": "Device Control Adapter Plugin Manifest",
+  "description": "Platform-specific adapter metadata. Secrets are referenced by secret_ref only; platform SDKs remain inside the adapter.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "adapter_id", "version", "api_version", "configuration_schema",
+    "supported_features", "required_permissions", "capability_mappings",
+    "resource_limits", "license"
+  ],
+  "properties": {
+    "adapter_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"},
+    "display_name": {"type": "string", "minLength": 1, "maxLength": 160},
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+"},
+    "api_version": {"const": "1.0"},
+    "publisher": {"type": "string", "maxLength": 200},
+    "license": {"type": "string", "minLength": 1, "maxLength": 100},
+    "sbom": {
+      "type": "object",
+      "properties": {
+        "format": {"enum": ["spdx", "cyclonedx"]},
+        "ref": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "supported_platforms": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "supported_platform_versions": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "supported_features": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "supported_protocols": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "required_permissions": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "configuration_schema": {"type": "object"},
+    "credential_schema": {
+      "type": "object",
+      "description": "Only secret references are allowed, never literal credentials.",
+      "additionalProperties": true
+    },
+    "capability_mappings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["capability_id", "version", "native_operation", "risk_tier"],
+        "properties": {
+          "capability_id": {"type": "string", "minLength": 1},
+          "version": {"type": "string", "minLength": 1},
+          "native_operation": {"type": "string", "minLength": 1},
+          "risk_tier": {"enum": ["read", "write", "destructive", "safety_critical"]},
+          "requires_state": {"type": "boolean"},
+          "idempotent": {"type": "boolean"},
+          "verification": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "schema_versions": {
+      "type": "object",
+      "properties": {
+        "device": {"type": "string"},
+        "telemetry": {"type": "string"},
+        "event": {"type": "string"},
+        "twin": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "health_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "timeout_ms"],
+        "properties": {
+          "name": {"type": "string"},
+          "timeout_ms": {"type": "integer", "minimum": 50},
+          "endpoint": {"type": ["string", "null"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "resource_limits": {
+      "type": "object",
+      "properties": {
+        "cpu": {"type": "number", "minimum": 0},
+        "memory_mb": {"type": "integer", "minimum": 16},
+        "timeout_seconds": {"type": "integer", "minimum": 1},
+        "max_devices": {"type": "integer", "minimum": 0},
+        "max_concurrency": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "signature": {
+      "type": "object",
+      "required": ["algorithm", "key_id", "value"],
+      "properties": {
+        "algorithm": {"const": "Ed25519"},
+        "key_id": {"type": "string"},
+        "value": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  }
+}
