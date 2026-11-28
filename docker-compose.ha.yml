@@ -25,6 +25,8 @@ services:
       MINDOS_IDENTITY_HMAC_KEY: ${MINDOS_IDENTITY_HMAC_KEY:-local-dev-identity-key-0123456789}
       MINDOS_IDENTITY_ISSUER: ${MINDOS_IDENTITY_ISSUER:-}
       DEVICE_CONTROL_REDACTION_HMAC_KEY: ${DEVICE_CONTROL_REDACTION_HMAC_KEY:-local-dev-redaction-key-0123456789}
+      DEVICE_CONTROL_BINDING_SIGNING_KEY: ${DEVICE_CONTROL_BINDING_SIGNING_KEY:-local-dev-binding-signing-key-0123456789}
+      DEVICE_CONTROL_BINDING_KEY_ID: ${DEVICE_CONTROL_BINDING_KEY_ID:-local-binding-key-1}
     ports:
       - "8085:8085"
     volumes:
@@ -49,7 +51,42 @@ services:
       HA_TOKEN_SECRET: ${HA_TOKEN_SECRET:-vault:ha-test-token}
       HA_PLATFORM_INSTANCE_ID: ${HA_PLATFORM_INSTANCE_ID:-ha-1}
       HA_TENANT: ${HA_TENANT:-tenant-a}
-      HA_ALLOWED_ENTITIES: ${HA_ALLOWED_ENTITIES:-light.bed_light,sensor.temperature}
+      DEVICE_CONTROL_BINDING_VERIFICATION_KEY: ${DEVICE_CONTROL_BINDING_VERIFICATION_KEY:-local-dev-binding-signing-key-0123456789}
+      DEVICE_CONTROL_BINDING_KEY_ID: ${DEVICE_CONTROL_BINDING_KEY_ID:-local-binding-key-1}
+      HA_BINDING_STATE_PATH: /tmp/ha-binding-state.json
+      DEVICE_ADAPTER_ALLOW_INSECURE_HTTP: "1"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+
+  ha-event-worker:
+    profiles: ["ha"]
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile.ha
+    command: ["python", "scripts/ha_event_worker.py"]
+    restart: unless-stopped
+    depends_on:
+      device-control:
+        condition: service_started
+      home-assistant:
+        condition: service_healthy
+    environment:
+      DEVICE_CONTROL_URL: http://device-control:8085
+      DEVICE_GATEWAY_ID: ${DEVICE_GATEWAY_ID:-ha-ha-1}
+      DEVICE_GATEWAY_CREDENTIAL: ${DEVICE_GATEWAY_CREDENTIAL:?create platform instance and inject one-time credential}
+      HA_BASE_URL: http://home-assistant:8123
+      HA_TOKEN: ${HA_TOKEN:?create a test HA long-lived token}
+      HA_TOKEN_SECRET: ${HA_TOKEN_SECRET:-vault:ha-test-token}
+      HA_PLATFORM_INSTANCE_ID: ${HA_PLATFORM_INSTANCE_ID:-ha-1}
+      HA_OWNER_ID: ${HA_OWNER_ID:-ha-event-worker-1}
+      DEVICE_CONTROL_BINDING_VERIFICATION_KEY: ${DEVICE_CONTROL_BINDING_VERIFICATION_KEY:-local-dev-binding-signing-key-0123456789}
+      DEVICE_CONTROL_BINDING_KEY_ID: ${DEVICE_CONTROL_BINDING_KEY_ID:-local-binding-key-1}
+      HA_BINDING_STATE_PATH: /tmp/ha-binding-state.json
       DEVICE_ADAPTER_ALLOW_INSECURE_HTTP: "1"
     read_only: true
     security_opt:

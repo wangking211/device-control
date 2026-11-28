@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
+import os
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from ...canonical import canonical_json
@@ -127,7 +130,7 @@ class BindingRegistry:
 
     def __init__(self, *, tenant_ref: str, gateway_id: str, platform_instance_id: str,
                  verification_key: str | None = None, key_id: str | None = None,
-                 clock=None) -> None:
+                 clock=None, state_path: str | Path | None = None) -> None:
         for value in (tenant_ref, gateway_id, platform_instance_id):
             if not str(value or "").strip():
                 raise ValueError("binding registry scope is incomplete")
@@ -138,18 +141,26 @@ class BindingRegistry:
         self._key_id = key_id or ""
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._bindings: dict[str, DeviceBinding] = {}
+        self._tombstones: dict[str, tuple[int, int, str]] = {}
         self._seen_nonces: dict[str, str] = {}
         self._document_revision = 0
         self._document_digest: str | None = None
+        self._state_path = Path(state_path) if state_path else None
+        self._load_state()
 
     def bind(self, *, entity_id: str, endpoint_id: str, device_id: str,
              capabilities: Iterable[str], revision: int | None = None,
              ttl_seconds: float = 300.0) -> DeviceBinding:
         now = self._clock()
         previous = self._bindings.get(entity_id)
-        next_revision = revision if revision is not None else (
-            (previous.revision + 1) if previous else 1
+        tombstone = self._tombstones.get(entity_id)
+        floor = max(
+            previous.revision if previous else 0,
+            tombstone[0] if tombstone else 0,
         )
+        next_revision = revision if revision is not None else floor + 1
+        if next_revision <= floor:
+            raise BindingRejected("binding_revision_regression")
         binding = DeviceBinding(
             tenant_ref=self.tenant_ref,
             gateway_id=self.gateway_id,
@@ -163,6 +174,8 @@ class BindingRegistry:
             valid_until=now + timedelta(seconds=ttl_seconds),
         )
         self._bindings[entity_id] = binding
+        self._tombstones.pop(entity_id, None)
+        self._persist_state()
         return binding
 
     def revoke(self, entity_id: str) -> DeviceBinding | None:
@@ -171,11 +184,14 @@ class BindingRegistry:
             return None
         revoked = replace(binding, revoked_at=self._clock(), revision=binding.revision + 1)
         self._bindings[entity_id] = revoked
+        self._persist_state()
         return revoked
 
     def resolve(self, entity_id: str) -> DeviceBinding:
         binding = self._bindings.get(entity_id)
         if binding is None:
+            if entity_id in self._tombstones:
+                raise BindingRejected("binding_revoked")
             raise BindingRejected("entity_binding_missing")
         binding.assert_active(self._clock())
         return binding
@@ -246,7 +262,7 @@ class BindingRegistry:
             raise BindingRejected("binding_document_stale")
 
         items = document.get("bindings")
-        if not isinstance(items, list) or not items:
+        if not isinstance(items, list):
             raise BindingRejected("binding_document_empty")
         pending: dict[str, DeviceBinding] = {}
         for item in items:
@@ -263,14 +279,35 @@ class BindingRegistry:
                 raise BindingRejected("binding_revision_invalid")
             if raw_revision < 1:
                 raise BindingRejected("binding_revision_invalid")
+            capability_set = frozenset(str(value) for value in capabilities)
+            endpoint_id = str(item.get("endpoint_id") or "")
+            device_id = str(item.get("device_id") or "")
+            existing = self._bindings.get(entity_id)
+            if existing is not None:
+                if raw_revision < existing.revision:
+                    raise BindingRejected("binding_revision_regression")
+                if raw_revision == existing.revision and (
+                    existing.endpoint_id != endpoint_id
+                    or existing.device_id != device_id
+                    or existing.capabilities != capability_set
+                ):
+                    raise BindingRejected("binding_document_conflict")
+            tombstone = self._tombstones.get(entity_id)
+            if tombstone is not None:
+                # A re-added entity must come from a newer snapshot and use a
+                # strictly newer per-device revision than the revocation.
+                if raw_document_revision <= tombstone[1]:
+                    raise BindingRejected("binding_revision_regression")
+                if raw_revision <= tombstone[0]:
+                    raise BindingRejected("binding_revision_regression")
             binding = DeviceBinding(
                 tenant_ref=self.tenant_ref,
                 gateway_id=self.gateway_id,
                 platform_instance_id=self.platform_instance_id,
-                endpoint_id=str(item.get("endpoint_id") or ""),
-                device_id=str(item.get("device_id") or ""),
+                endpoint_id=endpoint_id,
+                device_id=device_id,
                 entity_id=entity_id,
-                capabilities=frozenset(str(value) for value in capabilities),
+                capabilities=capability_set,
                 revision=raw_revision,
                 issued_at=_parse_timestamp(item.get("issued_at")) or now,
                 valid_until=valid_until,
@@ -302,12 +339,103 @@ class BindingRegistry:
                 and self._document_digest not in {None, binding_set_digest}):
             raise BindingRejected("binding_document_conflict")
 
-        # Commit only after every item validated.
-        self._bindings.update(pending)
+        # Snapshot semantics: the document is the complete active set. Any
+        # entity omitted from a newer snapshot becomes a durable tombstone.
+        omitted = set(self._bindings) - set(pending)
+        for entity_id in omitted:
+            old = self._bindings[entity_id]
+            self._tombstones[entity_id] = (
+                max(old.revision, (self._tombstones.get(entity_id) or (0,))[0]),
+                raw_document_revision,
+                now.isoformat(),
+            )
+        for entity_id in pending:
+            self._tombstones.pop(entity_id, None)
+        self._bindings = pending
         self._seen_nonces[nonce] = payload_digest
         self._document_revision = raw_document_revision
         self._document_digest = binding_set_digest
+        self._persist_state()
         return list(pending.values())
+
+    # -- durable edge cache --------------------------------------------
+
+    @staticmethod
+    def _binding_state(binding: DeviceBinding) -> dict[str, Any]:
+        return {
+            "tenant_ref": binding.tenant_ref,
+            "gateway_id": binding.gateway_id,
+            "platform_instance_id": binding.platform_instance_id,
+            "endpoint_id": binding.endpoint_id,
+            "device_id": binding.device_id,
+            "entity_id": binding.entity_id,
+            "capabilities": sorted(binding.capabilities),
+            "revision": binding.revision,
+            "issued_at": binding.issued_at.isoformat(),
+            "valid_until": binding.valid_until.isoformat(),
+            "revoked_at": binding.revoked_at.isoformat() if binding.revoked_at else None,
+            "source": binding.source,
+        }
+
+    def _load_state(self) -> None:
+        if self._state_path is None or not self._state_path.is_file():
+            return
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if (data.get("tenant_ref") != self.tenant_ref
+                or data.get("gateway_id") != self.gateway_id
+                or data.get("platform_instance_id") != self.platform_instance_id):
+            return
+        self._document_revision = int(data.get("document_revision") or 0)
+        self._document_digest = data.get("document_digest")
+        for item in data.get("bindings") or []:
+            issued_at = _parse_timestamp(item.get("issued_at"))
+            valid_until = _parse_timestamp(item.get("valid_until"))
+            if issued_at is None or valid_until is None:
+                continue
+            binding = DeviceBinding(
+                tenant_ref=self.tenant_ref,
+                gateway_id=self.gateway_id,
+                platform_instance_id=self.platform_instance_id,
+                endpoint_id=str(item.get("endpoint_id") or ""),
+                device_id=str(item.get("device_id") or ""),
+                entity_id=str(item.get("entity_id") or ""),
+                capabilities=frozenset(str(value) for value in item.get("capabilities") or []),
+                revision=int(item.get("revision") or 0),
+                issued_at=issued_at,
+                valid_until=valid_until,
+                revoked_at=_parse_timestamp(item.get("revoked_at")),
+                source=str(item.get("source") or "control-plane"),
+            )
+            self._bindings[binding.entity_id] = binding
+        for entity_id, value in (data.get("tombstones") or {}).items():
+            try:
+                self._tombstones[str(entity_id)] = (
+                    int(value[0]), int(value[1]), str(value[2]),
+                )
+            except (TypeError, ValueError, IndexError):
+                continue
+
+    def _persist_state(self) -> None:
+        if self._state_path is None:
+            return
+        data = {
+            "tenant_ref": self.tenant_ref,
+            "gateway_id": self.gateway_id,
+            "platform_instance_id": self.platform_instance_id,
+            "document_revision": self._document_revision,
+            "document_digest": self._document_digest,
+            "bindings": [self._binding_state(binding)
+                         for binding in self._bindings.values()],
+            "tombstones": {entity_id: list(value)
+                           for entity_id, value in self._tombstones.items()},
+        }
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
+        temporary.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, self._state_path)
 
     def snapshot(self) -> list[dict[str, Any]]:
         return [

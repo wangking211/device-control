@@ -146,6 +146,92 @@ def test_conflicting_same_revision_is_rejected():
     reject(bindings, signed(conflicting), "binding_document_conflict")
 
 
+def test_snapshot_omission_tombstones_entity():
+    bindings = registry()
+    bindings.load_document(signed(document()))
+    assert bindings.resolve("light.kitchen")
+    empty = signed(document(revision=11, nonce="nonce-11", bindings=[]))
+    bindings.load_document(empty)
+    with pytest.raises(BindingRejected) as exc:
+        bindings.resolve("light.kitchen")
+    assert exc.value.reason == "binding_revoked"
+
+
+def test_per_device_revision_cannot_regress_with_new_document_revision():
+    bindings = registry()
+    bindings.load_document(signed(document()))  # device revision 7
+    regressed = document(revision=12, nonce="nonce-12")
+    regressed["bindings"][0]["revision"] = 2
+    reject(bindings, signed(regressed), "binding_revision_regression")
+
+
+def test_same_device_revision_with_changed_content_is_conflict():
+    bindings = registry()
+    bindings.load_document(signed(document()))
+    changed = document(revision=12, nonce="nonce-12")
+    changed["bindings"][0]["capabilities"] = ["device.observe"]
+    reject(bindings, signed(changed), "binding_document_conflict")
+
+
+def test_bind_rejects_non_increasing_revision():
+    bindings = registry()
+    bindings.bind(entity_id="light.kitchen", endpoint_id="ep-ha",
+                  device_id="d1", capabilities={"device.observe"}, revision=8)
+    with pytest.raises(BindingRejected) as exc:
+        bindings.bind(entity_id="light.kitchen", endpoint_id="ep-ha",
+                      device_id="d1", capabilities={"device.observe"}, revision=8)
+    assert exc.value.reason == "binding_revision_regression"
+    with pytest.raises(BindingRejected):
+        bindings.bind(entity_id="light.kitchen", endpoint_id="ep-ha",
+                      device_id="d1", capabilities={"device.observe"}, revision=7)
+
+
+def test_restart_preserves_tombstone(tmp_path):
+    state_path = tmp_path / "binding-state.json"
+    bindings = BindingRegistry(
+        tenant_ref="tenant-a", gateway_id="ha-ha-1", platform_instance_id="ha-1",
+        verification_key=BINDING_KEY, key_id="test-binding-key-1",
+        state_path=state_path,
+    )
+    bindings.load_document(signed(document()))
+    bindings.load_document(signed(document(revision=11, nonce="nonce-11", bindings=[])))
+    restarted = BindingRegistry(
+        tenant_ref="tenant-a", gateway_id="ha-ha-1", platform_instance_id="ha-1",
+        verification_key=BINDING_KEY, key_id="test-binding-key-1",
+        state_path=state_path,
+    )
+    with pytest.raises(BindingRejected) as exc:
+        restarted.resolve("light.kitchen")
+    assert exc.value.reason == "binding_revoked"
+
+
+def test_revoke_during_queue_makes_worker_reject_stale_command():
+    from test_ha_binding_negative import RecordingAdapter, StubControl
+
+    from device_control.iot.adapters.worker import HomeAssistantPilotWorker
+
+    bindings = registry()
+    bindings.load_document(signed(document(revision=10, nonce="nonce-10")))
+    # The doc's device revision is 7; a queued command carrying it.
+    payload = {
+        "command_id": "cmd-stale", "tenant_ref": "tenant-a",
+        "gateway_id": "ha-ha-1", "platform_instance_id": "ha-1",
+        "endpoint_id": "ep-ha", "device_id": "ha:tenant-a:light:kitchen",
+        "capability_id": "device.observe", "operation": "observe",
+        "parameters": {"entity_id": "light.kitchen"},
+        "binding_revision": 7,
+        "policy_decision": "allow",
+    }
+    control = StubControl([payload])
+    adapter = RecordingAdapter()
+    # Newer snapshot omits the entity before execution.
+    bindings.load_document(signed(document(revision=11, nonce="nonce-11", bindings=[])))
+    HomeAssistantPilotWorker(client=control, adapter=adapter, bindings=bindings).run_once()
+    assert control.results[0][1]["reason"] == "binding_revoked"
+    assert adapter.service_calls == []
+    assert adapter.observed == 0
+
+
 def test_load_is_atomic_when_a_later_binding_is_invalid():
     bindings = registry()
     invalid = document()

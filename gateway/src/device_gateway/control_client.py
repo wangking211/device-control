@@ -133,6 +133,9 @@ class ControlPlaneClient:
         )
         return list(payload.get("items") or [])
 
+    def bindings(self) -> dict[str, Any]:
+        return self._request("GET", f"/v1/gateways/{self.gateway_id}/bindings", None)
+
     def progress(self, command_id: str, status: str) -> dict[str, Any]:
         return self._request(
             "POST", f"/v1/gateways/{self.gateway_id}/commands/{command_id}/progress",

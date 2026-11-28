@@ -29,3 +29,32 @@ def test_compose_gateway_transport_is_explicit_dev_only():
     assert environment["DEVICE_GATEWAY_ENV"] == "dev"
     assert environment["DEVICE_GATEWAY_ALLOW_INSECURE_HTTP"] == "1"
     assert environment["DEVICE_CONTROL_URL"].startswith("http://device-control")
+
+
+def ha_compose():
+    return yaml.safe_load(
+        (ROOT / "docker-compose.ha.yml").read_text(encoding="utf-8")
+    )
+
+
+def test_ha_compose_runs_managed_event_worker():
+    document = ha_compose()
+    worker = document["services"]["ha-event-worker"]
+    assert worker["command"] == ["python", "scripts/ha_event_worker.py"]
+    assert worker["restart"] == "unless-stopped"
+    assert worker["read_only"] is True
+    assert "no-new-privileges:true" in worker["security_opt"]
+    assert "ALL" in worker["cap_drop"]
+    assert "HA_TOKEN" in worker["environment"]
+    assert "HA_ALLOWED_ENTITIES" not in worker["environment"]
+
+
+def test_ha_compose_wires_signed_binding_keys():
+    document = ha_compose()
+    control = document["services"]["device-control"]["environment"]
+    control_key = control["DEVICE_CONTROL_BINDING_SIGNING_KEY"].split(":-")[-1]
+    control_id = control["DEVICE_CONTROL_BINDING_KEY_ID"].split(":-")[-1]
+    for name in ("ha-adapter", "ha-event-worker"):
+        environment = document["services"][name]["environment"]
+        assert environment["DEVICE_CONTROL_BINDING_VERIFICATION_KEY"].split(":-")[-1] == control_key
+        assert environment["DEVICE_CONTROL_BINDING_KEY_ID"].split(":-")[-1] == control_id

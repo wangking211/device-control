@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT / "gateway" / "src"))
 
 from device_gateway.control_client import ControlPlaneClient  # noqa: E402
 
+from device_control.iot.adapters.binding import BindingRegistry  # noqa: E402
 from device_control.iot.adapters.home_assistant_adapter import HomeAssistantAdapter  # noqa: E402
 from device_control.iot.adapters.worker import HomeAssistantPilotWorker  # noqa: E402
 from device_control.iot.spi import PlatformConfig  # noqa: E402
@@ -41,10 +42,6 @@ def main() -> int:
     secret_ref = os.environ.get("HA_TOKEN_SECRET") or ""
     if not token or not secret_ref:
         raise SystemExit("HA_TOKEN and HA_TOKEN_SECRET are required")
-    entities = {item.strip() for item in
-                (os.environ.get("HA_ALLOWED_ENTITIES") or "").split(",") if item.strip()}
-    if not entities:
-        raise SystemExit("HA_ALLOWED_ENTITIES is required")
     adapter = HomeAssistantAdapter()
     config = PlatformConfig(
         platform_instance_id=os.environ.get("HA_PLATFORM_INSTANCE_ID") or "ha-1",
@@ -60,8 +57,18 @@ def main() -> int:
         gateway_id=os.environ.get("DEVICE_GATEWAY_ID") or "",
         credential=os.environ.get("DEVICE_GATEWAY_CREDENTIAL") or "",
     )
-    worker = HomeAssistantPilotWorker(client=client, adapter=adapter,
-                                      allowed_entities=entities)
+    document = client.bindings()
+    registry = BindingRegistry(
+        tenant_ref=str(document.get("tenant_ref") or ""),
+        gateway_id=str(document.get("gateway_id") or ""),
+        platform_instance_id=str(document.get("platform_instance_id")
+                                 or config.platform_instance_id),
+        verification_key=os.environ.get("DEVICE_CONTROL_BINDING_VERIFICATION_KEY") or "",
+        key_id=os.environ.get("DEVICE_CONTROL_BINDING_KEY_ID") or "",
+        state_path=os.environ.get("HA_BINDING_STATE_PATH") or None,
+    )
+    registry.load_document(document)
+    worker = HomeAssistantPilotWorker(client=client, adapter=adapter, bindings=registry)
     if args.once:
         print(worker.run_once())
         return 0
