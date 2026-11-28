@@ -64,6 +64,15 @@ def test_verified_success_preserves_raw_but_requires_authoritative_success():
     assert unverified["provider_status"] == "succeeded"
 
 
+def test_normalize_canonical_is_idempotent_but_raw_verifying_means_running():
+    for status in status_projection.CANONICAL_STATUSES:
+        assert status_projection.normalize_canonical(status) == status
+    # Internal Device Control "verifying" is canonical "running"; an already
+    # canonical verifying value must not be re-mapped.
+    assert status_projection.canonical_status("verifying") == "running"
+    assert status_projection.normalize_canonical("verifying") == "verifying"
+
+
 def test_projection_contract_schema_is_valid():
     projected = status_projection.project({
         "status": "succeeded", "provider_status": "succeeded", "command_id": "cmd-1",

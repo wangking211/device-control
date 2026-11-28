@@ -67,6 +67,14 @@ def canonical_status(provider_status: Any) -> str:
     return STATUS_MAP.get(provider_status.strip().lower(), "unknown")
 
 
+def normalize_canonical(value: Any) -> str:
+    """Accept an already-canonical value or project a raw status."""
+
+    if isinstance(value, str) and value.strip().lower() in CANONICAL_STATUSES:
+        return value.strip().lower()
+    return canonical_status(value)
+
+
 def is_canonical_terminal(status: str) -> bool:
     return status in CANONICAL_TERMINAL
 
@@ -124,6 +132,7 @@ __all__ = [
     "STATUS_MAP",
     "canonical_status",
     "is_canonical_terminal",
+    "normalize_canonical",
     "project",
     "project_status",
 ]
