@@ -12,6 +12,7 @@ were no events when a cursor gap exists.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import ssl
@@ -41,13 +42,25 @@ class EventDeduper:
 
     @staticmethod
     def _key(event: dict[str, Any]) -> str:
-        context = (event.get("event") or {}).get("context") or {}
+        event_body = event.get("event") or {}
+        context = event_body.get("context") or {}
         context_id = str(context.get("id") or "")
-        entity = str((event.get("event") or {}).get("data", {}).get("entity_id") or "")
-        state = str((event.get("event") or {}).get("data", {}).get("new_state", {}).get("state") or "")
+        data = event_body.get("data") or {}
+        entity = str(data.get("entity_id") or "")
+        new_state = data.get("new_state") or {}
+        state = str(new_state.get("state") or "")
+        # Attributes and last_updated are part of the identity: an
+        # attribute-only change must not be deduplicated as the same event.
+        attributes = new_state.get("attributes") or {}
+        attributes_digest = hashlib.sha256(
+            json.dumps(attributes, sort_keys=True, separators=(",", ":"),
+                       ensure_ascii=True).encode("utf-8")
+        ).hexdigest()[:16]
+        last_updated = str(new_state.get("last_updated") or "")
         if context_id:
-            return f"{context_id}:{entity}:{state}"
-        return f"{event.get('time_fired')}:{entity}:{state}:{event.get('event_type')}"
+            return f"{context_id}:{entity}:{state}:{attributes_digest}:{last_updated}"
+        return (f"{event.get('time_fired')}:{entity}:{state}:{attributes_digest}:"
+                f"{last_updated}:{event.get('event_type')}")
 
 
 @dataclass
@@ -136,6 +149,9 @@ class HomeAssistantWebSocket:
                         delivered += 1
                         if max_events is not None and delivered >= max_events:
                             return delivered
+            except PermissionError:
+                # Invalid/revoked token is not transient; retrying cannot help.
+                raise
             except (ConnectionClosed, ConnectionError, OSError):
                 if reconcile is not None:
                     reconcile()

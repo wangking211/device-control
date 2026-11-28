@@ -1040,6 +1040,9 @@ def iot_device_twin(
     twin = store.get_twin(_tenant(principal, tenant_ref), device_id)
     if twin is None:
         raise hidden()
+    device = store.get_iot_device(twin["tenant_ref"], device_id)
+    if device is not None:
+        twin["freshness"] = store.twin_freshness(device, twin)
     return twin
 
 
@@ -1059,6 +1062,36 @@ def update_iot_device_twin(
         desired=payload.get("desired"), reported=payload.get("reported"),
         observed=payload.get("observed"),
     )
+
+
+@app.get("/v1/platform-instances/{platform_instance_id}/ingest-state", tags=["iot"])
+def platform_ingest_state(
+    platform_instance_id: str,
+    tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_GATEWAY_READ)
+    tenant = _tenant(principal, tenant_ref)
+    if store.get_platform_instance(tenant, platform_instance_id) is None:
+        raise hidden()
+    return store.get_ha_ingest_state(tenant, platform_instance_id)
+
+
+@app.get("/v1/platform-instances/{platform_instance_id}/events", tags=["iot"])
+def platform_ingested_events(
+    platform_instance_id: str,
+    device_id: str | None = None,
+    limit: int | None = None,
+    tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_GATEWAY_READ)
+    tenant = _tenant(principal, tenant_ref)
+    if store.get_platform_instance(tenant, platform_instance_id) is None:
+        raise hidden()
+    return {"items": store.list_ha_events(
+        tenant, platform_instance_id, device_id=device_id, limit=limit,
+    )}
 
 
 # ---------------------------------------------------------------------------

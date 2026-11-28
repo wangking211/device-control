@@ -2795,6 +2795,298 @@ def get_twin(tenant: str, device_id: str) -> dict[str, Any] | None:
     }
 
 
+TWIN_FRESHNESS_SECONDS: dict[str, float] = {
+    "sensor": 60.0,
+    "binary_sensor": 60.0,
+    "light": 300.0,
+    "switch": 300.0,
+}
+DEFAULT_TWIN_FRESHNESS_SECONDS = 300.0
+
+
+def twin_freshness(device: dict[str, Any], twin: dict[str, Any] | None, *,
+                   moment: datetime | None = None) -> dict[str, Any]:
+    """Per-device-type freshness; a single global threshold is unsafe."""
+
+    observed = (twin or {}).get("observed") or {}
+    max_age = TWIN_FRESHNESS_SECONDS.get(
+        str(device.get("device_type") or ""), DEFAULT_TWIN_FRESHNESS_SECONDS
+    )
+    timestamp = parse_timestamp(str(observed.get("observed_at") or "")) \
+        if observed.get("observed_at") else None
+    current = moment or now()
+    age = max(0.0, (current - timestamp).total_seconds()) if timestamp else None
+    stale = (
+        timestamp is None
+        or age is None
+        or age > max_age
+        or observed.get("connectivity") != "online"
+    )
+    return {
+        "observed_at": observed.get("observed_at"),
+        "age_seconds": age,
+        "max_age_seconds": max_age,
+        "stale": stale,
+        "quality": observed.get("quality"),
+        "connectivity": observed.get("connectivity"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Home Assistant durable event ingestion
+# ---------------------------------------------------------------------------
+
+HA_ATTRIBUTE_NOISE = frozenset({"friendly_name", "icon"})
+HA_EVENT_SCHEMA_VERSION = "1"
+
+
+def _ha_attributes_hash(attributes: dict[str, Any]) -> str:
+    relevant = {key: value for key, value in attributes.items()
+                if key not in HA_ATTRIBUTE_NOISE}
+    return digest_object(relevant)
+
+
+def _ha_event_key(*, context_id: str, entity_id: str, state: str | None,
+                  attributes_hash: str, observed_at: str) -> str:
+    # Attribute and last_updated changes must not be deduplicated: two events
+    # with the same entity/state but different attributes are real changes.
+    return digest_object({
+        "context_id": context_id,
+        "entity_id": entity_id,
+        "state": state,
+        "attributes_hash": attributes_hash,
+        "observed_at": observed_at,
+    })
+
+
+def _ha_ingest_row(tx: sqlite3.Connection, tenant: str,
+                   platform_instance_id: str) -> sqlite3.Row:
+    row = tx.execute(
+        "SELECT * FROM ha_ingest_state WHERE tenant_ref=? AND platform_instance_id=?",
+        (tenant, platform_instance_id),
+    ).fetchone()
+    if row is not None:
+        return row
+    tx.execute(
+        "INSERT INTO ha_ingest_state (platform_instance_id, tenant_ref, updated_at)"
+        " VALUES (?, ?, ?)",
+        (platform_instance_id, tenant, iso()),
+    )
+    return tx.execute(
+        "SELECT * FROM ha_ingest_state WHERE tenant_ref=? AND platform_instance_id=?",
+        (tenant, platform_instance_id),
+    ).fetchone()
+
+
+def record_ha_event(*, tenant: str, platform_instance_id: str, device_id: str,
+                    entity_id: str, state: str | None,
+                    attributes: dict[str, Any] | None = None,
+                    observed_at: str, received_at: str,
+                    context_id: str = "", quality: str = "good",
+                    status: str = "ok") -> dict[str, Any]:
+    """Persist one normalized HA state event and advance the tenant cursor.
+
+    The device must already be claimed on this exact platform instance. The
+    event log has a deterministic dedupe key, so replay after a crash or a
+    reconnect is idempotent. Telemetry and the observed twin are written in the
+    same transaction, *before* the persisted cursor advances.
+    """
+
+    attributes = attributes or {}
+    attrs_hash = _ha_attributes_hash(attributes)
+    event_key = _ha_event_key(
+        context_id=context_id, entity_id=entity_id, state=state,
+        attributes_hash=attrs_hash, observed_at=observed_at,
+    )
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            device = tx.execute(
+                "SELECT * FROM iot_devices WHERE device_id=? AND tenant_ref=?"
+                " AND platform_instance_id=?",
+                (device_id, tenant, platform_instance_id),
+            ).fetchone()
+            if device is None:
+                raise hidden()
+            if device["trust_state"] != "claimed":
+                raise conflict("device_not_claimed")
+            cursor = tx.execute(
+                "INSERT OR IGNORE INTO ha_event_log (event_key, tenant_ref,"
+                " platform_instance_id, device_id, entity_id, state, attributes_json,"
+                " attributes_hash, observed_at, received_at, context_id, quality, status,"
+                " schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (event_key, tenant, platform_instance_id, device_id, entity_id, state,
+                 json.dumps(attributes, sort_keys=True), attrs_hash, observed_at,
+                 received_at, context_id, quality, status, HA_EVENT_SCHEMA_VERSION),
+            )
+            duplicate = cursor.rowcount == 0
+            ingested = _ha_ingest_row(tx, tenant, platform_instance_id)
+            if duplicate:
+                tx.execute(
+                    "UPDATE ha_ingest_state SET duplicate_count=duplicate_count+1,"
+                    " connected=1, last_error=NULL, updated_at=? WHERE tenant_ref=?"
+                    " AND platform_instance_id=?",
+                    (iso(), tenant, platform_instance_id),
+                )
+            else:
+                tx.execute(
+                    "INSERT OR IGNORE INTO iot_telemetry (telemetry_id, tenant_ref,"
+                    " platform_instance_id, device_id, entity_id, metric, value_json, unit,"
+                    " observed_at, received_at, source, quality, status, schema_version)"
+                    " VALUES (?, ?, ?, ?, ?, 'state', ?, NULL, ?, ?,"
+                    " 'home-assistant-ws', ?, ?, ?)",
+                    (f"tel_{secrets.token_urlsafe(18)}", tenant, platform_instance_id,
+                     device_id, entity_id, json.dumps(state), observed_at, received_at,
+                     quality, status, HA_EVENT_SCHEMA_VERSION),
+                )
+                if status == "ok":
+                    current = tx.execute(
+                        "SELECT observed_json FROM iot_twins WHERE device_id=? AND tenant_ref=?",
+                        (device_id, tenant),
+                    ).fetchone()
+                    previous = _json(current["observed_json"], {}) if current else {}
+                    incoming = {
+                        "state": state,
+                        "attributes": attributes,
+                        "observed_at": observed_at,
+                        "received_at": received_at,
+                        "source": "home-assistant-ws",
+                        "quality": quality,
+                        "connectivity": "online",
+                        "event_key": event_key,
+                        "context_id": context_id,
+                        "schema_version": HA_EVENT_SCHEMA_VERSION,
+                    }
+                    next_observed = _keep_newer(previous, incoming)
+                    tx.execute(
+                        "INSERT INTO iot_twins (device_id, tenant_ref, desired_json,"
+                        " reported_json, observed_json, updated_at)"
+                        " VALUES (?, ?, '{}', '{}', ?, ?)"
+                        " ON CONFLICT(device_id) DO UPDATE SET"
+                        " observed_json=excluded.observed_json, updated_at=excluded.updated_at",
+                        (device_id, tenant, json.dumps(next_observed, sort_keys=True), iso()),
+                    )
+                tx.execute(
+                    "UPDATE ha_ingest_state SET connected=1, last_event_at=?,"
+                    " last_event_key=?, last_received_at=?, last_error=NULL, updated_at=?"
+                    " WHERE tenant_ref=? AND platform_instance_id=?",
+                    (observed_at, event_key, received_at, iso(), tenant,
+                     platform_instance_id),
+                )
+                _event(
+                    tx, tenant=tenant, event_type="iot.state.changed",
+                    aggregate_type="iot_device", aggregate_id=device_id,
+                    payload={"entity_id": entity_id, "state": state,
+                             "event_key": event_key, "observed_at": observed_at,
+                             "schema_version": HA_EVENT_SCHEMA_VERSION},
+                )
+            return {
+                "event_key": event_key,
+                "device_id": device_id,
+                "entity_id": entity_id,
+                "state": state,
+                "observed_at": observed_at,
+                "received_at": received_at,
+                "duplicate": duplicate,
+                "schema_version": HA_EVENT_SCHEMA_VERSION,
+                "cursor": str(ingested["last_event_key"] or ""),
+            }
+    finally:
+        db.close()
+
+
+def set_ha_connection(*, tenant: str, platform_instance_id: str, connected: bool,
+                      error: str | None = None, reconnected: bool = False) -> None:
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            _ha_ingest_row(tx, tenant, platform_instance_id)
+            tx.execute(
+                "UPDATE ha_ingest_state SET connected=?, last_error=?,"
+                " reconnect_count=reconnect_count+?, updated_at=?"
+                " WHERE tenant_ref=? AND platform_instance_id=?",
+                (1 if connected else 0, error, 1 if reconnected else 0, iso(),
+                 tenant, platform_instance_id),
+            )
+    finally:
+        db.close()
+
+
+def record_ha_gap(*, tenant: str, platform_instance_id: str, reason: str,
+                  reconciled: bool = False) -> dict[str, Any]:
+    """Record a durable replication gap and reconcile marker."""
+
+    timestamp = iso()
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            _ha_ingest_row(tx, tenant, platform_instance_id)
+            tx.execute(
+                "UPDATE ha_ingest_state SET gap_count=gap_count+1, last_gap_at=?,"
+                " last_reconcile_at=COALESCE(?, last_reconcile_at), updated_at=?"
+                " WHERE tenant_ref=? AND platform_instance_id=?",
+                (timestamp, timestamp if reconciled else None, timestamp, tenant,
+                 platform_instance_id),
+            )
+            _event(
+                tx, tenant=tenant, event_type="iot.event.gap",
+                aggregate_type="platform_instance", aggregate_id=platform_instance_id,
+                payload={"reason": reason, "reconciled": reconciled,
+                         "schema_version": HA_EVENT_SCHEMA_VERSION},
+            )
+    finally:
+        db.close()
+    return {"platform_instance_id": platform_instance_id, "reason": reason,
+            "gap_at": timestamp, "reconciled": reconciled}
+
+
+def get_ha_ingest_state(tenant: str, platform_instance_id: str) -> dict[str, Any]:
+    db = connect()
+    try:
+        row = db.execute(
+            "SELECT * FROM ha_ingest_state WHERE tenant_ref=? AND platform_instance_id=?",
+            (tenant, platform_instance_id),
+        ).fetchone()
+    finally:
+        db.close()
+    if row is None:
+        return {
+            "platform_instance_id": platform_instance_id, "tenant_ref": tenant,
+            "connected": False, "last_event_at": None, "last_event_key": None,
+            "last_received_at": None, "last_reconcile_at": None, "last_gap_at": None,
+            "reconnect_count": 0, "duplicate_count": 0, "gap_count": 0,
+            "last_error": None,
+        }
+    data = dict(row)
+    data["connected"] = bool(data["connected"])
+    return data
+
+
+def list_ha_events(tenant: str, platform_instance_id: str, *,
+                   device_id: str | None = None, limit: int | None = None
+                   ) -> list[dict[str, Any]]:
+    clauses = ["tenant_ref=?", "platform_instance_id=?"]
+    values: list[Any] = [tenant, platform_instance_id]
+    if device_id:
+        clauses.append("device_id=?")
+        values.append(device_id)
+    db = connect()
+    try:
+        rows = db.execute(
+            "SELECT * FROM ha_event_log WHERE " + " AND ".join(clauses)  # nosec B608
+            + " ORDER BY observed_at DESC, received_at DESC LIMIT ?",
+            (*values, _list_limit(limit)),
+        ).fetchall()
+    finally:
+        db.close()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["attributes"] = _json(item.pop("attributes_json", "{}"), {})
+        result.append(item)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Evidence metadata
 # ---------------------------------------------------------------------------

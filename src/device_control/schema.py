@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-LATEST_VERSION = 10
+LATEST_VERSION = 11
 
 
 @dataclass(frozen=True)
@@ -360,6 +360,31 @@ MIGRATIONS: tuple[Migration, ...] = (    Migration(
             "ALTER TABLE device_commands ADD COLUMN provider_status TEXT",
             "CREATE INDEX IF NOT EXISTS ix_commands_canonical_review "
             "ON device_commands(tenant_ref, status, provider_status)",
+        ),
+    ),
+    Migration(
+        11,
+        "dc014_ha_durable_event_ingestion",
+        (
+            "CREATE TABLE IF NOT EXISTS ha_event_log ("
+            " event_key TEXT PRIMARY KEY, tenant_ref TEXT NOT NULL,"
+            " platform_instance_id TEXT NOT NULL, device_id TEXT NOT NULL,"
+            " entity_id TEXT NOT NULL, state TEXT, attributes_json TEXT NOT NULL DEFAULT '{}',"
+            " attributes_hash TEXT NOT NULL, observed_at TEXT NOT NULL,"
+            " received_at TEXT NOT NULL, context_id TEXT, quality TEXT NOT NULL,"
+            " status TEXT NOT NULL, schema_version TEXT NOT NULL DEFAULT '1')",
+            "CREATE INDEX IF NOT EXISTS ix_ha_event_log_device_time "
+            "ON ha_event_log(tenant_ref, platform_instance_id, device_id, observed_at)",
+            "CREATE TABLE IF NOT EXISTS ha_ingest_state ("
+            " platform_instance_id TEXT PRIMARY KEY, tenant_ref TEXT NOT NULL,"
+            " connected INTEGER NOT NULL DEFAULT 0, last_event_at TEXT,"
+            " last_event_key TEXT, last_received_at TEXT, last_reconcile_at TEXT,"
+            " last_gap_at TEXT, reconnect_count INTEGER NOT NULL DEFAULT 0,"
+            " duplicate_count INTEGER NOT NULL DEFAULT 0,"
+            " gap_count INTEGER NOT NULL DEFAULT 0, last_error TEXT,"
+            " updated_at TEXT NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS ix_ha_ingest_state_tenant "
+            "ON ha_ingest_state(tenant_ref, platform_instance_id)",
         ),
     ),
 )
