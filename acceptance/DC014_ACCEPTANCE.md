@@ -1,8 +1,9 @@
 # DC-014 Acceptance
 
 Date: 2026-11-28
-Device Control: `main` after this change set (see commit log)
-MindOS: `main` after this change set (see commit log)
+Device Control: `main` at `22106ec` (014-01/02 `116445d`, 014-05/06 `65aa1fa`)
+MindOS: `main` at `300fb06e`
+Implementation report: `docs/DC014_IMPLEMENTATION_REPORT.md`
 
 Status vocabulary: PASS (local evidence), PARTIAL (local evidence but a
 required environment is missing), BLOCKED (environment absent; not PASS).
@@ -29,7 +30,7 @@ required environment is missing), BLOCKED (environment absent; not PASS).
 Device Control:
 
 ```
-python -m pytest -q                     # 190 passed
+python -m pytest -q                     # 191 passed
 ruff check src tests gateway            # clean
 bandit -r src/device_control             # no issues identified
 ```
