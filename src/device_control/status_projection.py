@@ -34,6 +34,13 @@ CANONICAL_TERMINAL = frozenset({
     "succeeded", "failed", "unknown", "cancelled", "expired",
 })
 
+# Lease cleanup is deliberately narrower than display terminality: ``unknown``
+# is unresolved and must be reconciled before a lease can be safely released.
+LEASE_RELEASABLE = frozenset({
+    "succeeded", "failed", "cancelled", "expired",
+})
+RECONCILABLE = frozenset({"unknown", "verifying"})
+
 # Internal/provider status -> canonical status. Keys that do not appear here
 # project to ``unknown``.
 STATUS_MAP: dict[str, str] = {
@@ -77,6 +84,14 @@ def normalize_canonical(value: Any) -> str:
 
 def is_canonical_terminal(status: str) -> bool:
     return status in CANONICAL_TERMINAL
+
+
+def is_lease_releasable(status: str) -> bool:
+    return status in LEASE_RELEASABLE
+
+
+def is_reconcilable(status: str) -> bool:
+    return status in RECONCILABLE
 
 
 def project_status(command: Mapping[str, Any]) -> str:
@@ -129,9 +144,13 @@ __all__ = [
     "CANONICAL_STATUSES",
     "CANONICAL_TERMINAL",
     "CONTRACT_VERSION",
+    "LEASE_RELEASABLE",
+    "RECONCILABLE",
     "STATUS_MAP",
     "canonical_status",
     "is_canonical_terminal",
+    "is_lease_releasable",
+    "is_reconcilable",
     "normalize_canonical",
     "project",
     "project_status",

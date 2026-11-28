@@ -73,6 +73,16 @@ def test_normalize_canonical_is_idempotent_but_raw_verifying_means_running():
     assert status_projection.normalize_canonical("verifying") == "verifying"
 
 
+def test_unknown_is_terminal_for_display_but_not_lease_releasable():
+    assert status_projection.is_canonical_terminal("unknown") is True
+    assert status_projection.is_lease_releasable("unknown") is False
+    assert status_projection.is_reconcilable("unknown") is True
+    for status in ("succeeded", "failed", "cancelled", "expired"):
+        assert status_projection.is_lease_releasable(status) is True
+    for status in ("running", "verifying", "succeeded"):
+        assert status_projection.is_lease_releasable(status) is (status == "succeeded")
+
+
 def test_projection_contract_schema_is_valid():
     projected = status_projection.project({
         "status": "succeeded", "provider_status": "succeeded", "command_id": "cmd-1",
