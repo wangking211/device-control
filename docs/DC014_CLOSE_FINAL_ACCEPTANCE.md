@@ -7,7 +7,7 @@ Task pack: `DC-014-CLOSE_Codex_Task_Pack.zip`
 
 | Repo | Baseline (fetched) | Close code commit |
 |---|---|---|
-| `wangking211/device-control` | `d341ebbb43f4fd213ab342cadc23e7f95567d20e` | `ac6c5623315a46ad3e018d64be49abcce54016c4` |
+| `wangking211/device-control` | `d341ebbb43f4fd213ab342cadc23e7f95567d20e` | `f48ca416f00f9e6b59e85e40d326d86fca582605` |
 | `wangking211/mind-os` | `300fb06e77e5828ee09ad9314c4a97b56bd05dca` | `9b9c541e9566064cb45be204a9a78f4953cdb4e6` |
 
 Both repositories were at the fetched `origin/main` before work; no newer
@@ -20,7 +20,7 @@ commit was overwritten. MindOS retains two pre-existing untracked local files
 |---|---|---|
 | 00 Baseline, CI root cause, reproduction | PARTIAL | `artifacts/dc014-close/baseline.json`, `ci-failure-analysis.md`, `reproduction.md`; four reproducible failures fixed. Remote job logs **BLOCKED** (no `gh`/token) |
 | 01 Read/Write lease contract | PASS | `tests/test_lease_matrix.py`: read lease read, no/expired/cross-tenant lease, read lease + write, missing approval, bad nonce, valid write, audited release |
-| 02 Binding revision and trust edge | PASS | Mandatory exact `binding_revision`; signed document (scope, revision, nonce, validity); `tests/test_binding_document.py` covers forged/expired/cross-scope/replay/stale/conflict/atomic failure |
+| 02 Binding revision and trust edge | PASS | Mandatory exact `binding_revision`; signed document (scope, revision, nonce, validity); `tests/test_binding_document.py` covers forged/expired/cross-scope/replay/stale/conflict/atomic failure; document revision is monotonic so revocation supersedes cache |
 | 03 Real TaskRun integration | BLOCKED (live) | Coordinator + lease release exist (`mind-os/tests/test_device_task_run_dc014.py`); no running MindOS/Device Control pair to prove a real TaskRun |
 | 04 Provider/OpenAPI/API conformance | PARTIAL | Shared submit fixture validates against the command schema and live test API; command detail/cancel/evidence response fields asserted; a true two-service smoke run is BLOCKED |
 | 05 MindOS CI / Evidence Gates repair | PARTIAL | Local CI-equivalent suite green; remote CI and Evidence Gate URLs **BLOCKED** (no GitHub access) |
@@ -35,7 +35,7 @@ commit was overwritten. MindOS retains two pre-existing untracked local files
 Device Control:
 
 ```
-python -m pytest -q                                      # 221 passed
+python -m pytest -q                                      # 222 passed
 ruff check src tests gateway                             # clean
 mypy ... --ignore-missing-imports --no-site-packages     # 42 files, clean
 bandit -c .bandit -r src gateway/src                     # no issues
