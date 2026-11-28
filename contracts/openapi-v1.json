@@ -2536,6 +2536,66 @@
         ]
       }
     },
+    "/v1/gateways/{gateway_id}/bindings": {
+      "get": {
+        "operationId": "gateway_bindings_v1_gateways__gateway_id__bindings_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "gateway_id",
+            "required": true,
+            "schema": {
+              "title": "Gateway Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Gateway Bindings V1 Gateways  Gateway Id  Bindings Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Gateway Bindings",
+        "tags": [
+          "gateways"
+        ]
+      }
+    },
     "/v1/gateways/{gateway_id}/commands": {
       "get": {
         "operationId": "pull_commands_v1_gateways__gateway_id__commands_get",
@@ -4521,6 +4581,190 @@
           }
         },
         "summary": "Sync Platform Devices",
+        "tags": [
+          "iot"
+        ]
+      }
+    },
+    "/v1/platform-instances/{platform_instance_id}/events": {
+      "get": {
+        "operationId": "platform_ingested_events_v1_platform_instances__platform_instance_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "platform_instance_id",
+            "required": true,
+            "schema": {
+              "title": "Platform Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "device_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Device Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenant_ref",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tenant Ref"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Platform Ingested Events V1 Platform Instances  Platform Instance Id  Events Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Platform Ingested Events",
+        "tags": [
+          "iot"
+        ]
+      }
+    },
+    "/v1/platform-instances/{platform_instance_id}/ingest-state": {
+      "get": {
+        "operationId": "platform_ingest_state_v1_platform_instances__platform_instance_id__ingest_state_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "platform_instance_id",
+            "required": true,
+            "schema": {
+              "title": "Platform Instance Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenant_ref",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tenant Ref"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Platform Ingest State V1 Platform Instances  Platform Instance Id  Ingest State Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Platform Ingest State",
         "tags": [
           "iot"
         ]
