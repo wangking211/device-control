@@ -28,14 +28,14 @@ Remote `main` was fetched before work; no newer commit was overwritten.
 | 014-07 Claim/authorize UI | BLOCKED | No browser/frontend runtime; API claim/read-only already tested |
 | 014-08 Docker + HA E2E | BLOCKED | `docker` not installed; compose not executed |
 | 014-09 Android E2E | BLOCKED | `adb` not installed; no emulator/device |
-| 014-10 Production readiness | BLOCKED | No production environment; writes remain disabled |
+| 014-10 Production readiness | PARTIAL / BLOCKED | Missing production secrets fail closed at startup and writes default OFF; key rotation, backup/RPO/RTO and failure drills BLOCKED |
 
 ## Verification actually run
 
 Device Control:
 
 ```
-python -m pytest -q                    # 191 passed
+python -m pytest -q                    # 194 passed
 ruff check src tests gateway           # All checks passed
 bandit -r src/device_control            # No issues identified
 python -m mypy <new modules> --python-version 3.12
@@ -70,6 +70,9 @@ DC-014 change.
 - Only claimed entities of the exact tenant/platform are ingested.
 - MindOS uses the existing runtime registry and Device Control Evidence store;
   it creates no second registry, task engine, policy, twin or evidence store.
+- Production configuration validates identity/manifest/redaction secrets at
+  startup; physical writes are OFF unless `DEVICE_CONTROL_ENABLE_WRITES` is
+  explicitly enabled.
 
 ## Risks / open items
 

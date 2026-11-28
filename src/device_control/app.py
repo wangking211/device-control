@@ -54,6 +54,10 @@ app = FastAPI(
     ),
 )
 
+# Fail closed at startup in production: missing identity/manifest/redaction
+# secrets must prevent the process from serving requests.
+config.validate_production()
+
 
 # ---------------------------------------------------------------------------
 # Cross-cutting middleware
@@ -240,10 +244,16 @@ def ready() -> dict[str, Any]:
         reasons.append("database_unavailable")
     if config.is_production() and not config.snapshot().identity_configured:
         reasons.append("identity_not_configured")
+    configuration_errors = config.production_configuration_errors()
+    if configuration_errors:
+        reasons.append("production_configuration_incomplete")
     if reasons:
         raise DeviceControlError(503, "not_ready", detail={"reasons": reasons,
-                                                           "missing_contracts": missing})
-    return {"status": "ready", "contract_version": "v1", "profile": config.profile()}
+                                                           "missing_contracts": missing,
+                                                           "configuration_errors":
+                                                               configuration_errors})
+    return {"status": "ready", "contract_version": "v1", "profile": config.profile(),
+            "writes_enabled": config.writes_enabled()}
 
 
 @app.get("/v1/contracts", tags=["contracts"])
@@ -1129,6 +1139,9 @@ def submit_command(
     if capability is None or resolved is None:
         raise conflict("unsupported_capability")
     _, manifest_capability = resolved
+    if (str(manifest_capability.get("risk_tier") or "write") != "read"
+            and not config.writes_enabled()):
+        raise dependency_unavailable("writes_disabled")
     schema_errors = contracts.validate_instance(
         manifest_capability.get("input_schema") or {}, payload["input"]
     )

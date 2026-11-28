@@ -22,7 +22,7 @@ required environment is missing), BLOCKED (environment absent; not PASS).
 | D14-009 | Claim/authorize/revoke UI | BLOCKED | No browser/frontend runtime here; API claim/read-only already tested |
 | D14-010 | Docker + HA E2E | BLOCKED | No Docker daemon; compose file present, not executed |
 | D14-011 | Android controlled E2E | BLOCKED | No emulator/device |
-| D14-012 | Production secrets/backup drill | BLOCKED | No production environment; write features remain disabled |
+| D14-012 | Production secrets/backup drill | PARTIAL | `tests/test_production_gate.py`: missing identity/manifest/redaction config fails closed and writes default OFF in production; key rotation and backup/RPO/RTO drills BLOCKED (no production environment) |
 | D14-013 | Cross-tenant rejection | PASS | Platform/device/ingest/command tests return 404/empty for another tenant |
 
 ## Local commands used
@@ -30,7 +30,7 @@ required environment is missing), BLOCKED (environment absent; not PASS).
 Device Control:
 
 ```
-python -m pytest -q                     # 191 passed
+python -m pytest -q                     # 194 passed
 ruff check src tests gateway            # clean
 bandit -r src/device_control             # no issues identified
 ```

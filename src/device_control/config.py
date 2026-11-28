@@ -144,6 +144,48 @@ def stale_after_seconds() -> int:
     return _bounded_int("DEVICE_CONTROL_STALE_AFTER_SECONDS", 90, 15, 3600)
 
 
+def writes_enabled() -> bool:
+    """Physical writes are off by default in production.
+
+    Enabling them requires an explicit deployment decision; a development
+    fallback is never used. Local/test remain writable so the test suite and
+    the pilot can exercise the command path.
+    """
+
+    raw = (os.environ.get("DEVICE_CONTROL_ENABLE_WRITES") or "").strip().lower()
+    if raw:
+        return raw in {"1", "true", "yes"}
+    return not is_production()
+
+
+def production_configuration_errors() -> list[str]:
+    """Missing production secrets are startup failures, not request surprises."""
+
+    if not is_production():
+        return []
+    errors: list[str] = []
+    if len(identity_secret()) < 32:
+        errors.append("MINDOS_IDENTITY_HMAC_KEY")
+    if len(redaction_hmac_key()) < 32:
+        errors.append("DEVICE_CONTROL_REDACTION_HMAC_KEY")
+    if manifest_allow_hmac():
+        if len(manifest_hmac_key()) < 32:
+            errors.append("DEVICE_CONTROL_MANIFEST_HMAC_KEY")
+    elif not manifest_public_key():
+        errors.append("DEVICE_CONTROL_MANIFEST_PUBLIC_KEY")
+    if not manifest_allowed_key_ids():
+        errors.append("DEVICE_CONTROL_MANIFEST_KEY_IDS")
+    return errors
+
+
+def validate_production() -> None:
+    errors = production_configuration_errors()
+    if errors:
+        raise RuntimeError(
+            "production configuration is incomplete: " + ", ".join(sorted(errors))
+        )
+
+
 def event_retention_seconds() -> int:
     return _bounded_int("DEVICE_CONTROL_EVENT_RETENTION_SECONDS", 7 * 86400, 3600, 90 * 86400)
 
