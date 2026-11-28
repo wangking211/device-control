@@ -2670,7 +2670,7 @@ def gateway_binding_document(tenant: str, gateway_id: str, *,
             "endpoint_id": endpoint_id,
             "capabilities": capabilities,
             "revision": max(1, revision),
-            "issued_at": iso(now),
+            "issued_at": str(device.get("updated_at") or iso(now)),
         })
     if not bindings:
         raise conflict("no_claimed_devices")
@@ -2682,7 +2682,13 @@ def gateway_binding_document(tenant: str, gateway_id: str, *,
         "tenant_ref": tenant,
         "gateway_id": gateway_id,
         "platform_instance_id": platform["platform_instance_id"],
-        "revision": max(item["revision"] for item in bindings),
+        # Monotonic document revision so a revocation always supersedes the
+        # edge cache even when the revoked device carried the highest binding
+        # revision. Command matching still uses each binding's exact revision.
+        "revision": max(
+            max(item["revision"] for item in bindings),
+            int(now.timestamp() * 1_000_000),
+        ),
         "nonce": secrets.token_urlsafe(18),
         "issued_at": iso(now),
         "valid_until": iso(now + timedelta(seconds=max(30.0, effective_ttl))),

@@ -130,11 +130,20 @@ def test_stale_revision_is_rejected():
     reject(bindings, stale, "binding_document_stale")
 
 
+def test_refresh_with_same_revision_and_new_nonce_is_accepted():
+    bindings = registry()
+    bindings.load_document(signed(document()))
+    refreshed = signed(document(nonce="nonce-refresh"))
+    bindings.load_document(refreshed)
+    assert bindings.resolve("light.kitchen").revision == 7
+
+
 def test_conflicting_same_revision_is_rejected():
     bindings = registry()
     bindings.load_document(signed(document()))
-    conflicting = signed(document(nonce="nonce-other"))
-    reject(bindings, conflicting, "binding_document_conflict")
+    conflicting = document(nonce="nonce-other")
+    conflicting["bindings"][0]["capabilities"] = ["device.observe"]
+    reject(bindings, signed(conflicting), "binding_document_conflict")
 
 
 def test_load_is_atomic_when_a_later_binding_is_invalid():

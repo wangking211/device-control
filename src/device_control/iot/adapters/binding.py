@@ -244,9 +244,6 @@ class BindingRegistry:
             raise BindingRejected("binding_document_replay")
         if raw_document_revision < self._document_revision:
             raise BindingRejected("binding_document_stale")
-        if (raw_document_revision == self._document_revision
-                and self._document_digest not in {None, payload_digest}):
-            raise BindingRejected("binding_document_conflict")
 
         items = document.get("bindings")
         if not isinstance(items, list) or not items:
@@ -282,11 +279,34 @@ class BindingRegistry:
             binding.assert_active(now)
             pending[entity_id] = binding
 
+        binding_set_digest = hashlib.sha256(canonical_json({
+            "tenant_ref": self.tenant_ref,
+            "gateway_id": self.gateway_id,
+            "platform_instance_id": self.platform_instance_id,
+            "revision": raw_document_revision,
+            "bindings": sorted(
+                [
+                    {
+                        "entity_id": str(item.get("entity_id") or ""),
+                        "device_id": str(item.get("device_id") or ""),
+                        "endpoint_id": str(item.get("endpoint_id") or ""),
+                        "capabilities": sorted(str(value) for value in item.get("capabilities") or []),
+                        "revision": item.get("revision"),
+                    }
+                    for item in items
+                ],
+                key=lambda item: item["entity_id"],
+            ),
+        }).encode("utf-8")).hexdigest()
+        if (raw_document_revision == self._document_revision
+                and self._document_digest not in {None, binding_set_digest}):
+            raise BindingRejected("binding_document_conflict")
+
         # Commit only after every item validated.
         self._bindings.update(pending)
         self._seen_nonces[nonce] = payload_digest
         self._document_revision = raw_document_revision
-        self._document_digest = payload_digest
+        self._document_digest = binding_set_digest
         return list(pending.values())
 
     def snapshot(self) -> list[dict[str, Any]]:
