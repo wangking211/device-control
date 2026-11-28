@@ -1,0 +1,23 @@
+{
+  "pack": "DC-014-CLOSE-01",
+  "date": "2026-11-28",
+  "baseline": {
+    "device-control": "0e04482789a6cae566168d6d30103be62259115c",
+    "mind-os": "9b9c541e9566064cb45be204a9a78f4953cdb4e6"
+  },
+  "worktree": {
+    "device-control": "clean",
+    "mind-os": "clean except two pre-existing untracked local files"
+  },
+  "environment": {
+    "gh_cli": "unavailable",
+    "github_token": "unavailable",
+    "docker": "unavailable",
+    "adb": "unavailable",
+    "home_assistant": "unavailable"
+  },
+  "remote_ci": {
+    "runs_referenced_by_pack": ["46120415192", "46120416223"],
+    "status": "BLOCKED: logs and annotations inaccessible"
+  }
+}
