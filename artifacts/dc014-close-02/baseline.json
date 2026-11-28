@@ -1,0 +1,20 @@
+{
+  "pack": "DC-014-CLOSE-02",
+  "date": "2026-11-28",
+  "baseline": {
+    "device-control": "6f3886f359177f2843d24d063c40383940fe9990",
+    "mind-os": "e1362fa1a5705967ee1d50e837eb9b27f26c53b1"
+  },
+  "environment": {
+    "gh_cli": "unavailable",
+    "github_token": "unavailable",
+    "docker": "unavailable",
+    "adb": "unavailable",
+    "home_assistant": "unavailable"
+  },
+  "remote_ci": {
+    "ci_run": "46129214242",
+    "evidence_run": "46129215362",
+    "status": "BLOCKED: zero jobs returned / logs and annotations inaccessible"
+  }
+}
