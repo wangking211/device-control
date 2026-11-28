@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import random
 import ssl
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -110,15 +113,27 @@ class HomeAssistantWebSocket:
         self.last_event_at: float | None = None
         self.reconnects = 0
         self.last_gap: str | None = None
+        self.last_close_error: str | None = None
         self._connection: Any = None
 
     def close(self) -> None:
+        """Idempotent close; failures are recorded, never mask the caller."""
+
+        from websockets.exceptions import ConnectionClosed
+
         connection = self._connection
-        if connection is not None:
-            try:
-                connection.close()
-            except Exception:  # noqa: BLE001 - close must be best effort
-                pass
+        if connection is None:
+            return
+        self._connection = None
+        try:
+            connection.close()
+            self.last_close_error = None
+        except (ConnectionClosed, OSError) as exc:
+            # Normal shutdown races: socket already closed or transport gone.
+            self.last_close_error = type(exc).__name__
+        except Exception as exc:  # noqa: BLE001 - shutdown must stay best effort
+            self.last_close_error = type(exc).__name__
+            logger.warning("websocket close failed: %s", type(exc).__name__)
 
     def run(self, on_event: Callable[[dict[str, Any]], None],
             reconcile: Callable[[], None] | None = None,

@@ -1,6 +1,7 @@
 from device_control.iot.adapters.websocket import (
     Backoff,
     EventDeduper,
+    HomeAssistantWebSocket,
     classify_message,
     event_entities,
 )
@@ -44,3 +45,52 @@ def test_message_classification_and_auth_failure_boundary():
     assert classify_message({"type": "auth_invalid"}) == "auth_invalid"
     assert classify_message({"type": "event"}) == "event"
     assert classify_message({"type": "result"}) == "other"
+
+
+class _Connection:
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = 0
+
+    def close(self):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+
+
+def _socket(connection):
+    socket = HomeAssistantWebSocket(base_url="https://ha.example", token="token")
+    socket._connection = connection
+    return socket
+
+
+def test_close_is_idempotent_and_records_no_error():
+    connection = _Connection()
+    socket = _socket(connection)
+    socket.close()
+    assert connection.calls == 1
+    assert socket.last_close_error is None
+    socket.close()
+    assert connection.calls == 1
+
+
+def test_close_tolerates_already_closed_transport():
+    connection = _Connection(OSError("already closed"))
+    socket = _socket(connection)
+    socket.close()
+    assert socket.last_close_error == "OSError"
+    assert socket._connection is None
+
+
+def test_close_records_unexpected_error_without_masking_caller():
+    connection = _Connection(ValueError("unexpected"))
+    socket = _socket(connection)
+    socket.close()
+    assert socket.last_close_error == "ValueError"
+    assert socket._connection is None
+
+
+def test_close_without_connection_is_a_noop():
+    socket = _socket(None)
+    socket.close()
+    assert socket.last_close_error is None

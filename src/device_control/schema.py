@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-LATEST_VERSION = 13
+LATEST_VERSION = 14
 
 
 @dataclass(frozen=True)
@@ -400,6 +400,13 @@ MIGRATIONS: tuple[Migration, ...] = (    Migration(
         "dc014_ha_owner_fencing_generation",
         (
             "ALTER TABLE ha_ingest_state ADD COLUMN owner_generation INTEGER NOT NULL DEFAULT 0",
+        ),
+    ),
+    Migration(
+        14,
+        "dc014_ha_owner_incarnation",
+        (
+            "ALTER TABLE ha_ingest_state ADD COLUMN owner_incarnation TEXT",
         ),
     ),
 )

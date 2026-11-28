@@ -286,6 +286,132 @@ def test_owner_renewal_and_stale_generation_rejection(tmp_path, monkeypatch):
     assert exc.value.code == "stale_ingest_owner"
 
 
+def test_same_logical_owner_after_expiry_increments_generation(tmp_path, monkeypatch):
+    setup_platform(tmp_path, monkeypatch)
+    first = store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1",
+        owner_ref="ha-event-worker-1", incarnation="process-1", ttl_seconds=60,
+    )
+    db = store.connect()
+    db.execute("UPDATE ha_ingest_state SET owner_lease_until=?"
+               " WHERE tenant_ref='tenant-a' AND platform_instance_id='ha-1'",
+               ("2026-01-01T00:00:00+00:00",))
+    db.commit()
+    db.close()
+    restarted = store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1",
+        owner_ref="ha-event-worker-1", incarnation="process-2", ttl_seconds=60,
+    )
+    assert restarted["acquired"] is True
+    assert restarted["generation"] == first["generation"] + 1
+    assert restarted["reason"] == "new_owner"
+
+
+def test_same_incarnation_after_expiry_increments_generation(tmp_path, monkeypatch):
+    setup_platform(tmp_path, monkeypatch)
+    first = store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1",
+        owner_ref="worker", incarnation="process-1", ttl_seconds=60,
+    )
+    db = store.connect()
+    db.execute("UPDATE ha_ingest_state SET owner_lease_until=?"
+               " WHERE tenant_ref='tenant-a' AND platform_instance_id='ha-1'",
+               ("2026-01-01T00:00:00+00:00",))
+    db.commit()
+    db.close()
+    again = store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1",
+        owner_ref="worker", incarnation="process-1", ttl_seconds=60,
+    )
+    assert again["generation"] == first["generation"] + 1
+    assert again["reason"] == "lease_expired"
+
+
+def test_expired_lease_cannot_renew_or_ingest(tmp_path, monkeypatch):
+    entities = setup_platform(tmp_path, monkeypatch)
+    lease = store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1",
+        owner_ref="worker", incarnation="process-1", ttl_seconds=60,
+    )
+    db = store.connect()
+    db.execute("UPDATE ha_ingest_state SET owner_lease_until=?"
+               " WHERE tenant_ref='tenant-a' AND platform_instance_id='ha-1'",
+               ("2026-01-01T00:00:00+00:00",))
+    db.commit()
+    db.close()
+    assert store.renew_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1",
+        owner_ref="worker", incarnation="process-1",
+        generation=lease["generation"], ttl_seconds=60,
+    )["reason"] == "lease_expired"
+
+    pipeline_with_owner = pipeline(entities)
+    pipeline_with_owner.owner_ref = "worker"
+    pipeline_with_owner.owner_incarnation = "process-1"
+    pipeline_with_owner.owner_generation = lease["generation"]
+    with pytest.raises(DeviceControlError) as exc:
+        pipeline_with_owner.ingest(message(LIGHT, "on"))
+    assert exc.value.code == "stale_ingest_owner"
+
+
+def test_old_incarnation_cannot_ingest_after_new_generation(tmp_path, monkeypatch):
+    entities = setup_platform(tmp_path, monkeypatch)
+    first = store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1",
+        owner_ref="worker", incarnation="process-1", ttl_seconds=60,
+    )
+    db = store.connect()
+    db.execute("UPDATE ha_ingest_state SET owner_lease_until=?"
+               " WHERE tenant_ref='tenant-a' AND platform_instance_id='ha-1'",
+               ("2026-01-01T00:00:00+00:00",))
+    db.commit()
+    db.close()
+    second = store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1",
+        owner_ref="worker", incarnation="process-2", ttl_seconds=60,
+    )
+    assert second["generation"] > first["generation"]
+
+    old = pipeline(entities)
+    old.owner_ref = "worker"
+    old.owner_incarnation = "process-1"
+    old.owner_generation = first["generation"]
+    with pytest.raises(DeviceControlError):
+        old.ingest(message(LIGHT, "on"))
+
+    new = pipeline(entities)
+    new.owner_ref = "worker"
+    new.owner_incarnation = "process-2"
+    new.owner_generation = second["generation"]
+    assert new.ingest(message(LIGHT, "on"))["duplicate"] is False
+
+
+def test_concurrent_takeover_yields_exactly_one_owner(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    setup_platform(tmp_path, monkeypatch)
+    store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1",
+        owner_ref="worker", incarnation="old", ttl_seconds=60,
+    )
+    db = store.connect()
+    db.execute("UPDATE ha_ingest_state SET owner_lease_until=?"
+               " WHERE tenant_ref='tenant-a' AND platform_instance_id='ha-1'",
+               ("2026-01-01T00:00:00+00:00",))
+    db.commit()
+    db.close()
+
+    def take(name):
+        return store.acquire_ha_ingest_owner(
+            tenant="tenant-a", platform_instance_id="ha-1",
+            owner_ref="worker", incarnation=name, ttl_seconds=60,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(take, ["process-a", "process-b"]))
+    assert sum(1 for item in results if item["acquired"]) == 1
+
+
 def test_binding_refresh_removes_revoked_entity(tmp_path, monkeypatch):
     entities = setup_platform(tmp_path, monkeypatch)
     valid = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()

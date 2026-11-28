@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -66,6 +67,7 @@ class HomeAssistantEventPipeline:
     adapter: HomeAssistantAdapter | None = None
     max_future_skew_seconds: float = 300.0
     owner_ref: str | None = None
+    owner_incarnation: str | None = None
     owner_generation: int | None = None
     owner_ttl_seconds: float = 120.0
     ownership_lost: bool = False
@@ -129,6 +131,7 @@ class HomeAssistantEventPipeline:
             status=status,
             owner_ref=self.owner_ref,
             owner_generation=self.owner_generation,
+            owner_incarnation=self.owner_incarnation,
         )
         result["event_type"] = "state_changed"
         return result
@@ -148,6 +151,7 @@ class HomeAssistantEventPipeline:
             reconciled=True,
             owner_ref=self.owner_ref,
             owner_generation=self.owner_generation,
+            owner_incarnation=self.owner_incarnation,
         )
         reconciled = 0
         errors: list[str] = []
@@ -176,6 +180,7 @@ class HomeAssistantEventPipeline:
                     status="ok" if observation.quality == "good" else "reconcile_degraded",
                     owner_ref=self.owner_ref,
                     owner_generation=self.owner_generation,
+                    owner_incarnation=self.owner_incarnation,
                 )
                 reconciled += 1
         store.set_ha_connection(
@@ -188,8 +193,10 @@ class HomeAssistantEventPipeline:
     def run(self, websocket: HomeAssistantWebSocket, *,
             stop: Callable[[], bool] | None = None,
             owner_ref: str | None = None,
-            owner_ttl_seconds: float | None = None) -> dict[str, Any]:
+            owner_ttl_seconds: float | None = None,
+            owner_incarnation: str | None = None) -> dict[str, Any]:
         ttl = float(owner_ttl_seconds or self.owner_ttl_seconds)
+        incarnation = owner_incarnation or uuid.uuid4().hex
         acquired = False
         if owner_ref:
             lease = store.acquire_ha_ingest_owner(
@@ -197,6 +204,7 @@ class HomeAssistantEventPipeline:
                 platform_instance_id=self.platform_instance_id,
                 owner_ref=owner_ref,
                 ttl_seconds=ttl,
+                incarnation=incarnation,
             )
             if not lease.get("acquired"):
                 # Another process owns this subscription; do not duplicate it.
@@ -205,6 +213,7 @@ class HomeAssistantEventPipeline:
                         "generation": lease.get("generation"),
                         "platform_instance_id": self.platform_instance_id}
             self.owner_ref = owner_ref
+            self.owner_incarnation = incarnation
             self.owner_generation = int(lease.get("generation") or 0)
             self.ownership_lost = False
             acquired = True
@@ -292,6 +301,7 @@ class HomeAssistantEventPipeline:
                     tenant=self.tenant_ref,
                     platform_instance_id=self.platform_instance_id,
                     owner_ref=owner_ref,
+                    incarnation=incarnation,
                 )
         status = ("binding_expired" if self.binding_expired else
                   "ownership_lost" if self.ownership_lost else "stopped")
@@ -311,6 +321,7 @@ class HomeAssistantEventPipeline:
                 owner_ref=self.owner_ref,
                 generation=self.owner_generation,
                 ttl_seconds=ttl_seconds,
+                incarnation=self.owner_incarnation,
             )
             if not result.get("renewed"):
                 # Fencing lost: stop the socket and reject further writes.
@@ -359,6 +370,7 @@ class HomeAssistantEventPipeline:
             "tenant_ref": self.tenant_ref,
             "connected": status == "connected",
             "owner_ref": self.owner_ref,
+            "owner_incarnation": self.owner_incarnation,
             "owner_generation": self.owner_generation,
             "ownership_lost": self.ownership_lost,
             "binding_expired": self.binding_expired,

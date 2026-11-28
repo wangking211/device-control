@@ -18,6 +18,7 @@ import os
 import signal
 import sys
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -136,6 +137,7 @@ def main() -> int:
         stop=stop.is_set,
         owner_ref=os.environ.get("HA_OWNER_ID") or f"ha-worker:{os.getpid()}",
         owner_ttl_seconds=float(os.environ.get("HA_OWNER_TTL_SECONDS") or 120),
+        owner_incarnation=uuid.uuid4().hex,
     )
     if result.get("status") == "auth_invalid":
         return 2

@@ -2956,7 +2956,8 @@ def record_ha_event(*, tenant: str, platform_instance_id: str, device_id: str,
                     observed_at: str, received_at: str,
                     context_id: str = "", quality: str = "good",
                     status: str = "ok", owner_ref: str | None = None,
-                    owner_generation: int | None = None) -> dict[str, Any]:
+                    owner_generation: int | None = None,
+                    owner_incarnation: str | None = None) -> dict[str, Any]:
     """Persist one normalized HA state event and advance the tenant cursor.
 
     The device must already be claimed on this exact platform instance. The
@@ -2985,7 +2986,8 @@ def record_ha_event(*, tenant: str, platform_instance_id: str, device_id: str,
                 raise conflict("device_not_claimed")
             if owner_ref is not None and owner_generation is not None:
                 _assert_ha_ingest_owner(tx, tenant, platform_instance_id,
-                                        owner_ref, owner_generation)
+                                        owner_ref, owner_generation,
+                                        owner_incarnation)
             cursor = tx.execute(
                 "INSERT OR IGNORE INTO ha_event_log (event_key, tenant_ref,"
                 " platform_instance_id, device_id, entity_id, state, attributes_json,"
@@ -3089,16 +3091,18 @@ def set_ha_connection(*, tenant: str, platform_instance_id: str, connected: bool
 
 
 def acquire_ha_ingest_owner(*, tenant: str, platform_instance_id: str,
-                            owner_ref: str, ttl_seconds: float = 120.0
-                            ) -> dict[str, Any]:
-    """Single-writer guard with a fencing generation.
+                            owner_ref: str, ttl_seconds: float = 120.0,
+                            incarnation: str | None = None) -> dict[str, Any]:
+    """Single-writer guard with fencing generation and process incarnation.
 
-    A new owner always receives a higher generation. A stale worker's event
-    writes are rejected by ``record_ha_event`` even if it keeps running.
+    A stable logical owner name may be reused by a restarted process, but a new
+    incarnation must never reuse an expired generation. A same-owner lease is
+    renewable only while unexpired and only from the same incarnation.
     """
 
     if not str(owner_ref or "").strip():
         return {"acquired": False, "reason": "owner_required", "generation": 0}
+    incarnation = str(incarnation or owner_ref)
     timestamp = iso()
     expires = iso(now() + timedelta(seconds=max(30.0, ttl_seconds)))
     db = connect()
@@ -3106,92 +3110,130 @@ def acquire_ha_ingest_owner(*, tenant: str, platform_instance_id: str,
         with transaction(db) as tx:
             row = _ha_ingest_row(tx, tenant, platform_instance_id)
             current_owner = str(row["owner_ref"] or "")
+            current_incarnation = str(row["owner_incarnation"] or "")
             current_until = parse_timestamp(str(row["owner_lease_until"] or "")) \
                 if row["owner_lease_until"] else None
             generation = int(row["owner_generation"] or 0)
-            if current_owner == owner_ref:
-                # Same process renewing: keep the generation stable.
+            lease_valid = current_until is not None and current_until > now()
+            same_process = (current_owner == owner_ref
+                            and current_incarnation == incarnation)
+            if same_process and lease_valid:
+                # Same incarnation renewing: keep the generation stable.
                 tx.execute(
                     "UPDATE ha_ingest_state SET owner_lease_until=?, updated_at=?"
                     " WHERE tenant_ref=? AND platform_instance_id=?",
                     (expires, timestamp, tenant, platform_instance_id),
                 )
                 return {"acquired": True, "renewed": True, "generation": generation,
-                        "owner_ref": owner_ref, "expires_at": expires}
-            if (current_owner and current_until is not None and current_until > now()):
+                        "reason": "renewed", "owner_ref": owner_ref,
+                        "incarnation": incarnation, "expires_at": expires}
+            if same_process and not lease_valid:
+                # The same logical name after expiry is a new ownership epoch.
+                generation += 1
+                tx.execute(
+                    "UPDATE ha_ingest_state SET owner_lease_until=?,"
+                    " owner_generation=?, updated_at=?"
+                    " WHERE tenant_ref=? AND platform_instance_id=?",
+                    (expires, generation, timestamp, tenant, platform_instance_id),
+                )
+                return {"acquired": True, "renewed": False, "generation": generation,
+                        "reason": "lease_expired", "owner_ref": owner_ref,
+                        "incarnation": incarnation, "expires_at": expires}
+            if current_owner and lease_valid:
                 return {"acquired": False, "reason": "owned_by_other",
                         "generation": generation, "owner_ref": current_owner,
                         "expires_at": iso(current_until)}
             generation += 1
             tx.execute(
-                "UPDATE ha_ingest_state SET owner_ref=?, owner_lease_until=?,"
-                " owner_generation=?, updated_at=?"
+                "UPDATE ha_ingest_state SET owner_ref=?, owner_incarnation=?,"
+                " owner_lease_until=?, owner_generation=?, updated_at=?"
                 " WHERE tenant_ref=? AND platform_instance_id=?",
-                (owner_ref, expires, generation, timestamp, tenant, platform_instance_id),
+                (owner_ref, incarnation, expires, generation, timestamp,
+                 tenant, platform_instance_id),
             )
             return {"acquired": True, "renewed": False, "generation": generation,
-                    "owner_ref": owner_ref, "expires_at": expires}
+                    "reason": "new_owner", "owner_ref": owner_ref,
+                    "incarnation": incarnation, "expires_at": expires}
     finally:
         db.close()
 
 
 def renew_ha_ingest_owner(*, tenant: str, platform_instance_id: str,
                           owner_ref: str, generation: int,
-                          ttl_seconds: float = 120.0) -> dict[str, Any]:
-    """Atomically extend ownership only for the exact fencing generation."""
+                          ttl_seconds: float = 120.0,
+                          incarnation: str | None = None) -> dict[str, Any]:
+    """Atomically extend ownership only for the exact, unexpired incarnation."""
 
+    incarnation = str(incarnation or owner_ref)
+    timestamp = iso()
     expires = iso(now() + timedelta(seconds=max(30.0, ttl_seconds)))
     db = connect()
     try:
         with transaction(db) as tx:
             row = _ha_ingest_row(tx, tenant, platform_instance_id)
-            current_owner = str(row["owner_ref"] or "")
-            current_generation = int(row["owner_generation"] or 0)
-            if current_owner != owner_ref or current_generation != generation:
+            current_until = parse_timestamp(str(row["owner_lease_until"] or "")) \
+                if row["owner_lease_until"] else None
+            if (str(row["owner_ref"] or "") != owner_ref
+                    or str(row["owner_incarnation"] or "") != incarnation
+                    or int(row["owner_generation"] or 0) != generation):
                 return {"renewed": False, "reason": "ownership_lost",
-                        "owner_ref": current_owner,
-                        "generation": current_generation}
+                        "generation": int(row["owner_generation"] or 0)}
+            if current_until is None or current_until <= now():
+                return {"renewed": False, "reason": "lease_expired",
+                        "generation": int(row["owner_generation"] or 0)}
             tx.execute(
                 "UPDATE ha_ingest_state SET owner_lease_until=?, updated_at=?"
                 " WHERE tenant_ref=? AND platform_instance_id=?",
-                (expires, iso(), tenant, platform_instance_id),
+                (expires, timestamp, tenant, platform_instance_id),
             )
             return {"renewed": True, "generation": generation,
-                    "owner_ref": owner_ref, "expires_at": expires}
+                    "owner_ref": owner_ref, "incarnation": incarnation,
+                    "expires_at": expires}
     finally:
         db.close()
 
 
 def _assert_ha_ingest_owner(tx: sqlite3.Connection, tenant: str,
                             platform_instance_id: str, owner_ref: str,
-                            generation: int) -> None:
+                            generation: int, incarnation: str | None = None) -> None:
     row = _ha_ingest_row(tx, tenant, platform_instance_id)
     current_until = parse_timestamp(str(row["owner_lease_until"] or "")) \
         if row["owner_lease_until"] else None
+    expected_incarnation = str(incarnation or owner_ref)
     if (str(row["owner_ref"] or "") != owner_ref
+            or str(row["owner_incarnation"] or "") != expected_incarnation
             or int(row["owner_generation"] or 0) != generation
             or current_until is None or current_until <= now()):
         raise conflict("stale_ingest_owner")
 
 
 def release_ha_ingest_owner(*, tenant: str, platform_instance_id: str,
-                            owner_ref: str) -> None:
+                            owner_ref: str, incarnation: str | None = None) -> None:
     db = connect()
     try:
         with transaction(db) as tx:
-            tx.execute(
-                "UPDATE ha_ingest_state SET owner_ref=NULL, owner_lease_until=NULL,"
-                " updated_at=? WHERE tenant_ref=? AND platform_instance_id=?"
-                " AND owner_ref=?",
-                (iso(), tenant, platform_instance_id, owner_ref),
-            )
+            if incarnation is None:
+                tx.execute(
+                    "UPDATE ha_ingest_state SET owner_ref=NULL, owner_incarnation=NULL,"
+                    " owner_lease_until=NULL, updated_at=? WHERE tenant_ref=?"
+                    " AND platform_instance_id=? AND owner_ref=?",
+                    (iso(), tenant, platform_instance_id, owner_ref),
+                )
+            else:
+                tx.execute(
+                    "UPDATE ha_ingest_state SET owner_ref=NULL, owner_incarnation=NULL,"
+                    " owner_lease_until=NULL, updated_at=? WHERE tenant_ref=?"
+                    " AND platform_instance_id=? AND owner_ref=? AND owner_incarnation=?",
+                    (iso(), tenant, platform_instance_id, owner_ref, incarnation),
+                )
     finally:
         db.close()
 
 
 def record_ha_gap(*, tenant: str, platform_instance_id: str, reason: str,
                   reconciled: bool = False, owner_ref: str | None = None,
-                  owner_generation: int | None = None) -> dict[str, Any]:
+                  owner_generation: int | None = None,
+                  owner_incarnation: str | None = None) -> dict[str, Any]:
     """Record a durable replication gap and reconcile marker."""
 
     timestamp = iso()
@@ -3201,7 +3243,8 @@ def record_ha_gap(*, tenant: str, platform_instance_id: str, reason: str,
             _ha_ingest_row(tx, tenant, platform_instance_id)
             if owner_ref is not None and owner_generation is not None:
                 _assert_ha_ingest_owner(tx, tenant, platform_instance_id,
-                                        owner_ref, owner_generation)
+                                        owner_ref, owner_generation,
+                                        owner_incarnation)
             tx.execute(
                 "UPDATE ha_ingest_state SET gap_count=gap_count+1, last_gap_at=?,"
                 " last_reconcile_at=COALESCE(?, last_reconcile_at), updated_at=?"
@@ -3236,7 +3279,8 @@ def get_ha_ingest_state(tenant: str, platform_instance_id: str) -> dict[str, Any
             "connected": False, "last_event_at": None, "last_event_key": None,
             "last_received_at": None, "last_reconcile_at": None, "last_gap_at": None,
             "reconnect_count": 0, "duplicate_count": 0, "gap_count": 0,
-            "owner_ref": None, "owner_generation": 0, "owner_lease_until": None,
+            "owner_ref": None, "owner_incarnation": None,
+            "owner_generation": 0, "owner_lease_until": None,
             "last_error": None,
         }
     data = dict(row)
