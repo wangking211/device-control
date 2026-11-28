@@ -18,6 +18,7 @@ import os
 import signal
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +66,10 @@ def main() -> int:
     tenant_ref = str(document.get("tenant_ref") or "")
     if not tenant_ref:
         raise SystemExit("binding document has no tenant scope")
+    state_path = os.environ.get("HA_BINDING_STATE_PATH") \
+        or "/var/lib/device-control-ha/binding-state.json"
+    health_path = os.environ.get("HA_HEALTH_PATH") \
+        or "/var/lib/device-control-ha/health.json"
     registry = BindingRegistry(
         tenant_ref=tenant_ref,
         gateway_id=str(document.get("gateway_id") or ""),
@@ -72,14 +77,23 @@ def main() -> int:
                                  or platform_instance_id),
         verification_key=os.environ.get("DEVICE_CONTROL_BINDING_VERIFICATION_KEY") or "",
         key_id=os.environ.get("DEVICE_CONTROL_BINDING_KEY_ID") or "",
-        state_path=os.environ.get("HA_BINDING_STATE_PATH") or None,
+        state_path=state_path,
     )
     registry.load_document(document)
-    entities = {
-        binding["entity_id"]: binding["device_id"]
-        for binding in registry.snapshot()
-        if not binding.get("revoked")
-    }
+
+    def load_bindings() -> tuple[dict[str, str], str]:
+        snapshot = client.bindings()
+        registry.load_document(snapshot)
+        return (
+            {
+                binding["entity_id"]: binding["device_id"]
+                for binding in registry.snapshot()
+                if not binding.get("revoked")
+            },
+            str(snapshot.get("valid_until") or ""),
+        )
+
+    entities, valid_until = load_bindings()
     if not entities:
         raise SystemExit("no claimed entities in binding snapshot")
 
@@ -100,6 +114,14 @@ def main() -> int:
         platform_instance_id=registry.platform_instance_id,
         entity_devices=entities,
         adapter=adapter,
+        binding_loader=load_bindings,
+        binding_refresh_seconds=float(
+            os.environ.get("HA_BINDING_REFRESH_SECONDS") or 60
+        ),
+        health_path=health_path,
+    )
+    pipeline.binding_valid_until = datetime.fromisoformat(
+        valid_until.replace("Z", "+00:00")
     )
     stop = threading.Event()
 
@@ -113,11 +135,16 @@ def main() -> int:
         build_websocket(base_url=base_url, token=token),
         stop=stop.is_set,
         owner_ref=os.environ.get("HA_OWNER_ID") or f"ha-worker:{os.getpid()}",
+        owner_ttl_seconds=float(os.environ.get("HA_OWNER_TTL_SECONDS") or 120),
     )
     if result.get("status") == "auth_invalid":
         return 2
     if result.get("status") == "standby":
         return 3
+    if result.get("status") == "ownership_lost":
+        return 4
+    if result.get("status") == "binding_expired":
+        return 5
     return 0
 
 

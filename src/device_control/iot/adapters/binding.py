@@ -382,12 +382,14 @@ class BindingRegistry:
             return
         try:
             data = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
+        except (OSError, ValueError) as exc:
+            raise BindingRejected("binding_state_corrupt") from exc
+        if not isinstance(data, dict) or data.get("schema_version") != "1":
+            raise BindingRejected("binding_state_corrupt")
         if (data.get("tenant_ref") != self.tenant_ref
                 or data.get("gateway_id") != self.gateway_id
                 or data.get("platform_instance_id") != self.platform_instance_id):
-            return
+            raise BindingRejected("binding_state_scope_mismatch")
         self._document_revision = int(data.get("document_revision") or 0)
         self._document_digest = data.get("document_digest")
         for item in data.get("bindings") or []:
@@ -422,6 +424,7 @@ class BindingRegistry:
         if self._state_path is None:
             return
         data = {
+            "schema_version": "1",
             "tenant_ref": self.tenant_ref,
             "gateway_id": self.gateway_id,
             "platform_instance_id": self.platform_instance_id,
@@ -435,6 +438,10 @@ class BindingRegistry:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
         temporary.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
         os.replace(temporary, self._state_path)
 
     def snapshot(self) -> list[dict[str, Any]]:

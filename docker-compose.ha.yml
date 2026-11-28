@@ -53,7 +53,8 @@ services:
       HA_TENANT: ${HA_TENANT:-tenant-a}
       DEVICE_CONTROL_BINDING_VERIFICATION_KEY: ${DEVICE_CONTROL_BINDING_VERIFICATION_KEY:-local-dev-binding-signing-key-0123456789}
       DEVICE_CONTROL_BINDING_KEY_ID: ${DEVICE_CONTROL_BINDING_KEY_ID:-local-binding-key-1}
-      HA_BINDING_STATE_PATH: /tmp/ha-binding-state.json
+      HA_BINDING_STATE_PATH: /var/lib/device-control-ha/binding-state.json
+      HA_HEALTH_PATH: /var/lib/device-control-ha/health.json
       DEVICE_ADAPTER_ALLOW_INSECURE_HTTP: "1"
     read_only: true
     security_opt:
@@ -62,6 +63,8 @@ services:
       - ALL
     tmpfs:
       - /tmp
+    volumes:
+      - ha-worker-state:/var/lib/device-control-ha
 
   ha-event-worker:
     profiles: ["ha"]
@@ -86,7 +89,10 @@ services:
       HA_OWNER_ID: ${HA_OWNER_ID:-ha-event-worker-1}
       DEVICE_CONTROL_BINDING_VERIFICATION_KEY: ${DEVICE_CONTROL_BINDING_VERIFICATION_KEY:-local-dev-binding-signing-key-0123456789}
       DEVICE_CONTROL_BINDING_KEY_ID: ${DEVICE_CONTROL_BINDING_KEY_ID:-local-binding-key-1}
-      HA_BINDING_STATE_PATH: /tmp/ha-binding-state.json
+      HA_BINDING_STATE_PATH: /var/lib/device-control-ha/binding-state.json
+      HA_HEALTH_PATH: /var/lib/device-control-ha/health.json
+      HA_OWNER_TTL_SECONDS: ${HA_OWNER_TTL_SECONDS:-120}
+      HA_BINDING_REFRESH_SECONDS: ${HA_BINDING_REFRESH_SECONDS:-60}
       DEVICE_ADAPTER_ALLOW_INSECURE_HTTP: "1"
     read_only: true
     security_opt:
@@ -95,6 +101,15 @@ services:
       - ALL
     tmpfs:
       - /tmp
+    volumes:
+      - ha-worker-state:/var/lib/device-control-ha
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,sys; d=json.load(open('/var/lib/device-control-ha/health.json')); sys.exit(0 if d.get('status') in {'connected','ready','standby'} else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
   device-control-data:
+  ha-worker-state:

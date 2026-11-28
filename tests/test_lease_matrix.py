@@ -162,6 +162,22 @@ def test_valid_write_lease_approval_and_nonce_allow(tmp_path, monkeypatch):
     assert response.json()["policy_decision"] == "ask"
 
 
+def test_lease_can_be_read_and_is_tenant_scoped(tmp_path, monkeypatch):
+    configure(monkeypatch, tmp_path)
+    stack = setup_stack(client)
+    agent = agent_token()
+    lease = acquire_lease(client, agent, endpoint_id=stack["endpoint_id"],
+                          mode="read_only")
+    fetched = client.get(f"/v1/device-leases/{lease['lease_id']}",
+                         headers=bearer(agent))
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["mode"] == "read_only"
+    assert fetched.json()["active"] is True
+    other = bearer(issue_token("intruder", "tenant-b", roles=("platform_admin",)))
+    assert client.get(f"/v1/device-leases/{lease['lease_id']}",
+                      headers=other).status_code == 404
+
+
 def test_lease_release_is_audited(tmp_path, monkeypatch):
     configure(monkeypatch, tmp_path)
     stack = setup_stack(client)

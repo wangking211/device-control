@@ -110,6 +110,15 @@ class HomeAssistantWebSocket:
         self.last_event_at: float | None = None
         self.reconnects = 0
         self.last_gap: str | None = None
+        self._connection: Any = None
+
+    def close(self) -> None:
+        connection = self._connection
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:  # noqa: BLE001 - close must be best effort
+                pass
 
     def run(self, on_event: Callable[[dict[str, Any]], None],
             reconcile: Callable[[], None] | None = None,
@@ -125,6 +134,7 @@ class HomeAssistantWebSocket:
         while not (stop and stop()):
             try:
                 with ws_connect(self.url, ssl=self.ssl_context, open_timeout=10) as ws:
+                    self._connection = ws
                     hello = json.loads(ws.recv())
                     if classify_message(hello) != "auth_required":
                         raise ConnectionError("unexpected auth handshake")

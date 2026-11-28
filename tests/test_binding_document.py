@@ -186,6 +186,21 @@ def test_bind_rejects_non_increasing_revision():
                       device_id="d1", capabilities={"device.observe"}, revision=7)
 
 
+def test_corrupt_or_wrong_scope_state_fails_closed(tmp_path):
+    state_path = tmp_path / "binding-state.json"
+    state_path.write_text("not-json", encoding="utf-8")
+    with pytest.raises(BindingRejected) as exc:
+        registry(state_path=state_path)
+    assert exc.value.reason == "binding_state_corrupt"
+
+    state_path.write_text('{"schema_version":"1","tenant_ref":"tenant-b",'
+                          '"gateway_id":"ha-ha-1","platform_instance_id":"ha-1",'
+                          '"bindings":[],"tombstones":{}}', encoding="utf-8")
+    with pytest.raises(BindingRejected) as exc:
+        registry(state_path=state_path)
+    assert exc.value.reason == "binding_state_scope_mismatch"
+
+
 def test_restart_preserves_tombstone(tmp_path):
     state_path = tmp_path / "binding-state.json"
     bindings = BindingRegistry(

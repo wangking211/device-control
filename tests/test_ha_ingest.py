@@ -216,9 +216,10 @@ class NoopWebSocket:
 
 def test_single_writer_owner_prevents_duplicate_subscription(tmp_path, monkeypatch):
     entities = setup_platform(tmp_path, monkeypatch)
-    assert store.acquire_ha_ingest_owner(
+    first = store.acquire_ha_ingest_owner(
         tenant="tenant-a", platform_instance_id="ha-1", owner_ref="node-a"
-    ) is True
+    )
+    assert first["acquired"] is True and first["generation"] == 1
     standby = pipeline(entities).run(NoopWebSocket(), owner_ref="node-b")
     assert standby["status"] == "standby"
     store.release_ha_ingest_owner(
@@ -226,11 +227,12 @@ def test_single_writer_owner_prevents_duplicate_subscription(tmp_path, monkeypat
     )
     started = pipeline(entities).run(NoopWebSocket(), owner_ref="node-b")
     assert started["status"] == "stopped"
+    assert started["generation"] == 2
 
 
-def test_expired_owner_can_be_taken_over(tmp_path, monkeypatch):
+def test_expired_owner_can_be_taken_over_with_new_generation(tmp_path, monkeypatch):
     setup_platform(tmp_path, monkeypatch)
-    assert store.acquire_ha_ingest_owner(
+    first = store.acquire_ha_ingest_owner(
         tenant="tenant-a", platform_instance_id="ha-1", owner_ref="node-a"
     )
     db = store.connect()
@@ -239,9 +241,98 @@ def test_expired_owner_can_be_taken_over(tmp_path, monkeypatch):
                ("2026-01-01T00:00:00+00:00",))
     db.commit()
     db.close()
-    assert store.acquire_ha_ingest_owner(
+    second = store.acquire_ha_ingest_owner(
         tenant="tenant-a", platform_instance_id="ha-1", owner_ref="node-b"
-    ) is True
+    )
+    assert second["acquired"] is True
+    assert second["generation"] == first["generation"] + 1
+
+
+def test_owner_renewal_and_stale_generation_rejection(tmp_path, monkeypatch):
+    entities = setup_platform(tmp_path, monkeypatch)
+    first = store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1", owner_ref="node-a",
+        ttl_seconds=60,
+    )
+    renewed = store.renew_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1", owner_ref="node-a",
+        generation=first["generation"], ttl_seconds=60,
+    )
+    assert renewed["renewed"] is True
+    assert renewed["generation"] == first["generation"]
+    assert store.renew_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1", owner_ref="node-a",
+        generation=first["generation"] + 1, ttl_seconds=60,
+    )["renewed"] is False
+
+    # Force a takeover by a new generation, then prove the old worker cannot
+    # write even though its process is still alive.
+    db = store.connect()
+    db.execute("UPDATE ha_ingest_state SET owner_lease_until=?"
+               " WHERE tenant_ref='tenant-a' AND platform_instance_id='ha-1'",
+               ("2026-01-01T00:00:00+00:00",))
+    db.commit()
+    db.close()
+    second = store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1", owner_ref="node-b"
+    )
+    assert second["generation"] == first["generation"] + 1
+
+    stale = pipeline(entities)
+    stale.owner_ref = "node-a"
+    stale.owner_generation = first["generation"]
+    with pytest.raises(DeviceControlError) as exc:
+        stale.ingest(message(LIGHT, "on"))
+    assert exc.value.code == "stale_ingest_owner"
+
+
+def test_binding_refresh_removes_revoked_entity(tmp_path, monkeypatch):
+    entities = setup_platform(tmp_path, monkeypatch)
+    valid = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    active = dict(entities)
+    pipe = HomeAssistantEventPipeline(
+        tenant_ref="tenant-a", platform_instance_id="ha-1",
+        entity_devices=active,
+        binding_loader=lambda: (active, valid),
+        binding_refresh_seconds=5,
+    )
+    assert pipe.ingest(message(LIGHT, "on"))["duplicate"] is False
+    active.pop(LIGHT)
+    pipe._apply_binding_load()
+    assert pipe.ingest(message(LIGHT, "off"))["ignored"] == "entity_not_claimed"
+
+
+def test_expired_binding_snapshot_fails_closed(tmp_path, monkeypatch):
+    entities = setup_platform(tmp_path, monkeypatch)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+
+    def failing_loader():
+        raise RuntimeError("control plane unavailable")
+
+    pipe = HomeAssistantEventPipeline(
+        tenant_ref="tenant-a", platform_instance_id="ha-1",
+        entity_devices=entities,
+        binding_loader=failing_loader,
+        binding_valid_until=datetime.fromisoformat(past),
+    )
+    result = pipe.run(NoopWebSocket())
+    assert result["status"] == "binding_expired"
+    assert pipe.binding_expired is True
+    assert pipe.ingest(message(LIGHT, "on"))["ignored"] == "binding_expired"
+
+
+def test_worker_health_file_reports_state(tmp_path, monkeypatch):
+    entities = setup_platform(tmp_path, monkeypatch)
+    health = tmp_path / "health.json"
+    pipe = HomeAssistantEventPipeline(
+        tenant_ref="tenant-a", platform_instance_id="ha-1",
+        entity_devices=entities, health_path=str(health),
+    )
+    pipe.run(NoopWebSocket())
+    payload = __import__("json").loads(health.read_text(encoding="utf-8"))
+    assert payload["status"] == "stopped"
+    assert payload["platform_instance_id"] == "ha-1"
+    assert payload["schema_version"] == "1"
 
 
 

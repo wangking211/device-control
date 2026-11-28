@@ -47,6 +47,15 @@ def test_ha_compose_runs_managed_event_worker():
     assert "ALL" in worker["cap_drop"]
     assert "HA_TOKEN" in worker["environment"]
     assert "HA_ALLOWED_ENTITIES" not in worker["environment"]
+    assert worker["environment"]["HA_BINDING_STATE_PATH"].startswith(
+        "/var/lib/device-control-ha/"
+    )
+    assert worker["environment"]["HA_HEALTH_PATH"].startswith(
+        "/var/lib/device-control-ha/"
+    )
+    assert "ha-worker-state:/var/lib/device-control-ha" in worker["volumes"]
+    assert worker["healthcheck"]["test"]
+    assert "ha-worker-state" in document["volumes"]
 
 
 def test_ha_compose_wires_signed_binding_keys():

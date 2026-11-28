@@ -635,6 +635,20 @@ def acquire_device_lease(
     )
 
 
+@app.get("/v1/device-leases/{lease_id}", tags=["leases"])
+def get_device_lease(
+    lease_id: str,
+    tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_LEASE_ACQUIRE)
+    lease = store.get_lease(_tenant(principal, tenant_ref), lease_id)
+    if lease is None:
+        raise hidden()
+    _enforce_endpoint_scope(principal, lease["endpoint_id"])
+    return lease
+
+
 @app.delete("/v1/device-leases/{lease_id}", tags=["leases"])
 def release_device_lease(
     lease_id: str,

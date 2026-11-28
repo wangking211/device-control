@@ -1277,6 +1277,23 @@ def release_lease(tenant: str, lease_id: str, *, actor: str | None = None,
         db.close()
 
 
+def get_lease(tenant: str, lease_id: str) -> dict[str, Any] | None:
+    db = connect()
+    try:
+        row = db.execute(
+            "SELECT * FROM device_leases WHERE lease_id=? AND tenant_ref=?",
+            (lease_id, tenant),
+        ).fetchone()
+    finally:
+        db.close()
+    if row is None:
+        return None
+    lease = dict(row)
+    lease["active"] = (lease.get("released_at") is None
+                       and str(lease.get("expires_at") or "") > iso())
+    return lease
+
+
 def active_lease(tenant: str, lease_id: str, endpoint_id: str) -> dict[str, Any] | None:
     db = connect()
     try:
@@ -2938,7 +2955,8 @@ def record_ha_event(*, tenant: str, platform_instance_id: str, device_id: str,
                     attributes: dict[str, Any] | None = None,
                     observed_at: str, received_at: str,
                     context_id: str = "", quality: str = "good",
-                    status: str = "ok") -> dict[str, Any]:
+                    status: str = "ok", owner_ref: str | None = None,
+                    owner_generation: int | None = None) -> dict[str, Any]:
     """Persist one normalized HA state event and advance the tenant cursor.
 
     The device must already be claimed on this exact platform instance. The
@@ -2965,6 +2983,9 @@ def record_ha_event(*, tenant: str, platform_instance_id: str, device_id: str,
                 raise hidden()
             if device["trust_state"] != "claimed":
                 raise conflict("device_not_claimed")
+            if owner_ref is not None and owner_generation is not None:
+                _assert_ha_ingest_owner(tx, tenant, platform_instance_id,
+                                        owner_ref, owner_generation)
             cursor = tx.execute(
                 "INSERT OR IGNORE INTO ha_event_log (event_key, tenant_ref,"
                 " platform_instance_id, device_id, entity_id, state, attributes_json,"
@@ -3068,11 +3089,16 @@ def set_ha_connection(*, tenant: str, platform_instance_id: str, connected: bool
 
 
 def acquire_ha_ingest_owner(*, tenant: str, platform_instance_id: str,
-                            owner_ref: str, ttl_seconds: float = 900.0) -> bool:
-    """Single-writer guard so two processes do not duplicate subscriptions."""
+                            owner_ref: str, ttl_seconds: float = 120.0
+                            ) -> dict[str, Any]:
+    """Single-writer guard with a fencing generation.
+
+    A new owner always receives a higher generation. A stale worker's event
+    writes are rejected by ``record_ha_event`` even if it keeps running.
+    """
 
     if not str(owner_ref or "").strip():
-        return False
+        return {"acquired": False, "reason": "owner_required", "generation": 0}
     timestamp = iso()
     expires = iso(now() + timedelta(seconds=max(30.0, ttl_seconds)))
     db = connect()
@@ -3082,17 +3108,70 @@ def acquire_ha_ingest_owner(*, tenant: str, platform_instance_id: str,
             current_owner = str(row["owner_ref"] or "")
             current_until = parse_timestamp(str(row["owner_lease_until"] or "")) \
                 if row["owner_lease_until"] else None
-            if (current_owner and current_owner != owner_ref
-                    and current_until is not None and current_until > now()):
-                return False
+            generation = int(row["owner_generation"] or 0)
+            if current_owner == owner_ref:
+                # Same process renewing: keep the generation stable.
+                tx.execute(
+                    "UPDATE ha_ingest_state SET owner_lease_until=?, updated_at=?"
+                    " WHERE tenant_ref=? AND platform_instance_id=?",
+                    (expires, timestamp, tenant, platform_instance_id),
+                )
+                return {"acquired": True, "renewed": True, "generation": generation,
+                        "owner_ref": owner_ref, "expires_at": expires}
+            if (current_owner and current_until is not None and current_until > now()):
+                return {"acquired": False, "reason": "owned_by_other",
+                        "generation": generation, "owner_ref": current_owner,
+                        "expires_at": iso(current_until)}
+            generation += 1
             tx.execute(
                 "UPDATE ha_ingest_state SET owner_ref=?, owner_lease_until=?,"
-                " updated_at=? WHERE tenant_ref=? AND platform_instance_id=?",
-                (owner_ref, expires, timestamp, tenant, platform_instance_id),
+                " owner_generation=?, updated_at=?"
+                " WHERE tenant_ref=? AND platform_instance_id=?",
+                (owner_ref, expires, generation, timestamp, tenant, platform_instance_id),
             )
-            return True
+            return {"acquired": True, "renewed": False, "generation": generation,
+                    "owner_ref": owner_ref, "expires_at": expires}
     finally:
         db.close()
+
+
+def renew_ha_ingest_owner(*, tenant: str, platform_instance_id: str,
+                          owner_ref: str, generation: int,
+                          ttl_seconds: float = 120.0) -> dict[str, Any]:
+    """Atomically extend ownership only for the exact fencing generation."""
+
+    expires = iso(now() + timedelta(seconds=max(30.0, ttl_seconds)))
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            row = _ha_ingest_row(tx, tenant, platform_instance_id)
+            current_owner = str(row["owner_ref"] or "")
+            current_generation = int(row["owner_generation"] or 0)
+            if current_owner != owner_ref or current_generation != generation:
+                return {"renewed": False, "reason": "ownership_lost",
+                        "owner_ref": current_owner,
+                        "generation": current_generation}
+            tx.execute(
+                "UPDATE ha_ingest_state SET owner_lease_until=?, updated_at=?"
+                " WHERE tenant_ref=? AND platform_instance_id=?",
+                (expires, iso(), tenant, platform_instance_id),
+            )
+            return {"renewed": True, "generation": generation,
+                    "owner_ref": owner_ref, "expires_at": expires}
+    finally:
+        db.close()
+
+
+def _assert_ha_ingest_owner(tx: sqlite3.Connection, tenant: str,
+                            platform_instance_id: str, owner_ref: str,
+                            generation: int) -> None:
+    row = _ha_ingest_row(tx, tenant, platform_instance_id)
+    current_until = parse_timestamp(str(row["owner_lease_until"] or "")) \
+        if row["owner_lease_until"] else None
+    if (str(row["owner_ref"] or "") != owner_ref
+            or int(row["owner_generation"] or 0) != generation
+            or current_until is None or current_until <= now()):
+        raise conflict("stale_ingest_owner")
 
 
 def release_ha_ingest_owner(*, tenant: str, platform_instance_id: str,
@@ -3111,7 +3190,8 @@ def release_ha_ingest_owner(*, tenant: str, platform_instance_id: str,
 
 
 def record_ha_gap(*, tenant: str, platform_instance_id: str, reason: str,
-                  reconciled: bool = False) -> dict[str, Any]:
+                  reconciled: bool = False, owner_ref: str | None = None,
+                  owner_generation: int | None = None) -> dict[str, Any]:
     """Record a durable replication gap and reconcile marker."""
 
     timestamp = iso()
@@ -3119,6 +3199,9 @@ def record_ha_gap(*, tenant: str, platform_instance_id: str, reason: str,
     try:
         with transaction(db) as tx:
             _ha_ingest_row(tx, tenant, platform_instance_id)
+            if owner_ref is not None and owner_generation is not None:
+                _assert_ha_ingest_owner(tx, tenant, platform_instance_id,
+                                        owner_ref, owner_generation)
             tx.execute(
                 "UPDATE ha_ingest_state SET gap_count=gap_count+1, last_gap_at=?,"
                 " last_reconcile_at=COALESCE(?, last_reconcile_at), updated_at=?"
@@ -3153,6 +3236,7 @@ def get_ha_ingest_state(tenant: str, platform_instance_id: str) -> dict[str, Any
             "connected": False, "last_event_at": None, "last_event_key": None,
             "last_received_at": None, "last_reconcile_at": None, "last_gap_at": None,
             "reconnect_count": 0, "duplicate_count": 0, "gap_count": 0,
+            "owner_ref": None, "owner_generation": 0, "owner_lease_until": None,
             "last_error": None,
         }
     data = dict(row)
