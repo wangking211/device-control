@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
@@ -17,6 +16,11 @@ from .ledger import ComputerRunLedger, LedgerEntry
 from .manifest import CAPABILITY_IDS, EXTERNAL_SIDE_EFFECT_CAPABILITIES, SHELL_CAPABILITIES
 from .providers.base import ComputerProvider
 from .session import SessionInfo, detect_session, local_takeover_requested
+from .session_mutex import DesktopMutex
+
+HIGH_RISK_CAPABILITIES = frozenset(EXTERNAL_SIDE_EFFECT_CAPABILITIES | {
+    "computer.clipboard.read", "computer.clipboard.write",
+})
 
 
 class ControlClient(Protocol):
@@ -46,7 +50,7 @@ class ComputerRuntime:
     ledger: ComputerRunLedger = field(default_factory=ComputerRunLedger)
     pause_path: str | None = None
     session_probe: Callable[[], SessionInfo] = detect_session
-    _desktop_lock: threading.Lock = field(default_factory=threading.Lock)
+    mutex_name: str = "MindOS.ComputerControl.Desktop"
 
     def run_once(self, limit: int = 10) -> dict[str, int]:
         commands = self.client.pull(limit)
@@ -94,8 +98,14 @@ class ComputerRuntime:
                 or str(envelope.get("gateway_id") or "") != self.gateway_id):
             self._reject(command_id, "binding_mismatch")
             return
+        if not action.task_ref or not action.run_ref:
+            self._reject(command_id, "task_run_required")
+            return
         if action.capability_id in SHELL_CAPABILITIES or action.capability_id not in self.allowed_capabilities:
             self._reject(command_id, "capability_not_allowlisted")
+            return
+        if action.capability_id in HIGH_RISK_CAPABILITIES and not action.approval_ref:
+            self._reject(command_id, "approval_required")
             return
         if self.paused():
             self._reject(command_id, "local_takeover")
@@ -132,8 +142,15 @@ class ComputerRuntime:
             self._reject(command_id, "provider_unavailable")
             return
 
-        with self._desktop_lock:
-            self._record(key, action, "executing", None)
+        with DesktopMutex(session.session_id, name=self.mutex_name).hold(2.0) as acquired:
+            if not acquired:
+                self._reject(command_id, "desktop_busy")
+                return
+            try:
+                self._record(key, action, "executing", None)
+            except RuntimeError as exc:
+                self._reject(command_id, str(exc))
+                return
             self.client.progress(command_id, "accepted")
             self.client.progress(command_id, "executing")
             try:
@@ -179,9 +196,11 @@ class ComputerRuntime:
     def _record(self, key: str, action: ComputerAction, phase: str,
                 result: dict[str, Any] | None) -> None:
         self.ledger.record(LedgerEntry(
-            schema="dc.computer-ledger/v1",
+            schema="dc.computer-ledger/v2",
             tenant_ref=action.tenant_ref,
             endpoint_id=action.endpoint_id,
+            task_ref=str(action.task_ref or ""),
+            run_ref=str(action.run_ref or ""),
             idempotency_key=action.idempotency_key,
             fingerprint=action.fingerprint(),
             phase=phase,
@@ -218,6 +237,27 @@ class ComputerRuntime:
         recorded = ComputerResult(**result)
         recorded.evidence_refs = list(recorded.evidence_refs or [])
         self._result(command_id, recorded, recorded.evidence_refs)
+
+    def reconcile_unknown(self, action: ComputerAction) -> dict[str, Any]:
+        """Observation-only reconciliation; never dispatches an action."""
+
+        if action.task_ref is None or action.run_ref is None:
+            raise RuntimeError("task_run_required")
+        if self.paused():
+            raise RuntimeError("local_takeover")
+        session = self.session_probe()
+        if not session.allows_ui():
+            raise RuntimeError(f"session_{session.state}")
+        provider = self._provider(action.capability_id)
+        if provider is None:
+            raise RuntimeError("provider_unavailable")
+        observation = provider.observe(action)
+        entry = self.ledger.get(action.ledger_key())
+        if entry is not None:
+            entry.phase = "unknown"
+            entry.result = {"status": "uncertain", "observation": redact_value(observation.to_dict())}
+            self.ledger.record(entry)
+        return redact_value(observation.to_dict())
 
 
 __all__ = ["ComputerRuntime", "ControlClient"]

@@ -126,6 +126,13 @@ class UiaProvider:
                 return self._failed(action, code, "interactive session unavailable")
             return self._failed(action, "uia_error", type(exc).__name__)
         except Exception as exc:  # noqa: BLE001 - provider isolation
+            if capability in WRITE_CAPABILITIES:
+                return ProviderExecution(ComputerResult(
+                    status="uncertain", provider_status="uia_exception_after_dispatch",
+                    error_code=type(exc).__name__,
+                    error_message="UIA failed after possible dispatch; reconcile",
+                    reconcile_required=True,
+                ))
             return self._failed(action, "uia_error", f"{type(exc).__name__}")
 
     def cancel(self, command_id: str) -> dict[str, Any]:

@@ -147,7 +147,8 @@ def manifest_document() -> dict[str, Any]:
             _capability("browser.navigate", "navigate", "write", {
                 "type": "object", "required": ["url"],
                 "properties": {"url": {"type": "string", "format": "uri",
-                                       "pattern": "^https?://"}},
+                                       "pattern": "^https?://"},
+                               "expected_url_contains": {"type": "string", "maxLength": 500}},
                 "additionalProperties": False,
             }, requires_change=True),
             _capability("browser.inspect", "inspect", "read", {
@@ -163,9 +164,19 @@ def manifest_document() -> dict[str, Any]:
                 "additionalProperties": False,
             }, requires_change=True),
             _capability("browser.submit", "submit", "write", {
-                "type": "object", "required": ["locator"],
-                "properties": {"locator": {"type": "object", "additionalProperties": True}},
-                "additionalProperties": False,
+                "type": "object", "required": ["locator", "postcondition"],
+                "properties": {
+                    "locator": {"type": "object", "additionalProperties": True},
+                    "postcondition": {
+                        "type": "object", "required": ["kind"],
+                        "properties": {
+                            "kind": {"enum": ["url_matches", "text_contains",
+                                              "receipt_id", "selector_visible"]},
+                            "value": {"type": "string", "maxLength": 500},
+                            "locator": {"type": "object", "additionalProperties": True},
+                        }, "additionalProperties": False,
+                    },
+                }, "additionalProperties": False,
             }, requires_change=True),
         ],
     }

@@ -103,7 +103,9 @@ class ComputerAction:
         ).hexdigest()
 
     def ledger_key(self) -> str:
-        return "|".join((self.tenant_ref, self.endpoint_id, self.idempotency_key))
+        return "|".join((self.tenant_ref, self.endpoint_id,
+                         str(self.task_ref or ""), str(self.run_ref or ""),
+                         self.idempotency_key))
 
 
 @dataclass

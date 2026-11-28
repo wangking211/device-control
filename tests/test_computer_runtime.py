@@ -217,8 +217,9 @@ def test_crash_after_dispatch_is_unknown_and_never_replayed(tmp_path):
     ledger = ComputerRunLedger(tmp_path / "ledger.json")
     action = ComputerAction.from_envelope(envelope())
     ledger.record(LedgerEntry(
-        schema="dc.computer-ledger/v1", tenant_ref="tenant-a",
+        schema="dc.computer-ledger/v2", tenant_ref="tenant-a",
         endpoint_id="pc-endpoint-1", idempotency_key=action.idempotency_key,
+        task_ref=str(action.task_ref), run_ref=str(action.run_ref),
         fingerprint=action.fingerprint(), phase="executing", command_id="cmd-1",
     ))
     client = FakeClient([envelope()])
@@ -251,8 +252,9 @@ def test_ledger_persists_and_corruption_fails_closed(tmp_path):
     ledger = ComputerRunLedger(path)
     action = ComputerAction.from_envelope(envelope())
     ledger.record(LedgerEntry(
-        schema="dc.computer-ledger/v1", tenant_ref="tenant-a",
+        schema="dc.computer-ledger/v2", tenant_ref="tenant-a",
         endpoint_id="pc-endpoint-1", idempotency_key=action.idempotency_key,
+        task_ref=str(action.task_ref), run_ref=str(action.run_ref),
         fingerprint=action.fingerprint(), phase="completed", command_id="cmd-1",
         result={"status": "succeeded"},
     ))
@@ -312,3 +314,244 @@ def test_desktop_mutex_serializes_two_actions(tmp_path):
         thread.join()
     assert provider.max_active == 1
     assert len(client.results) == 2
+
+def test_same_idempotency_key_different_task_or_run_is_distinct(tmp_path):
+    ledger = ComputerRunLedger(tmp_path / "ledger.json")
+    base = dict(schema="dc.computer-ledger/v2", tenant_ref="tenant-a",
+                endpoint_id="pc-endpoint-1", idempotency_key="same-key",
+                fingerprint="fp", phase="unknown", command_id="cmd-1")
+    ledger.record(LedgerEntry(**base, task_ref="task-1", run_ref="run-1"))
+    ledger.record(LedgerEntry(**base, task_ref="task-2", run_ref="run-1"))
+    ledger.record(LedgerEntry(**base, task_ref="task-1", run_ref="run-2"))
+    assert len(ledger.unresolved()) == 3
+
+
+def test_ledger_never_evicts_unknown_and_fails_closed_at_capacity(tmp_path, monkeypatch):
+    import device_control.computer.ledger as ledger_module
+
+    monkeypatch.setattr(ledger_module, "MAX_ENTRIES", 2)
+    ledger = ComputerRunLedger(tmp_path / "ledger.json")
+    for index in range(2):
+        ledger.record(LedgerEntry(
+            schema="dc.computer-ledger/v2", tenant_ref="tenant-a",
+            endpoint_id="pc-endpoint-1", idempotency_key=f"key-{index}",
+            fingerprint="fp", phase="unknown", command_id=f"cmd-{index}",
+            task_ref="task-1", run_ref="run-1",
+        ))
+    assert len(ledger.unresolved()) == 2
+    with pytest.raises(ledger_module.LedgerCapacity):
+        ledger.record(LedgerEntry(
+            schema="dc.computer-ledger/v2", tenant_ref="tenant-a",
+            endpoint_id="pc-endpoint-1", idempotency_key="new",
+            fingerprint="fp", phase="executing", command_id="cmd-new",
+            task_ref="task-1", run_ref="run-1",
+        ))
+    assert len(ledger.unresolved()) == 2
+
+
+def test_external_side_effect_requires_approval_ref(tmp_path):
+    instance, client, provider = runtime(tmp_path, commands=[
+        envelope(capability_id="browser.submit", operation="submit",
+                 parameters={"locator": {"role": "button", "name": "Send"},
+                             "postcondition": {"kind": "text_contains", "value": "sent"}}),
+    ])
+    instance.run_once()
+    assert provider.calls == 0
+    assert client.results[0][1]["reason"] == "approval_required"
+
+
+def test_reconcile_unknown_is_observation_only(tmp_path):
+    class ObservingProvider(FakeProvider):
+        def observe(self, action):
+            self.observations += 1
+            from device_control.computer.contracts import ComputerObservation
+            return ComputerObservation(session_state="unlocked", uia_tree={"name": "ok"})
+
+    provider = ObservingProvider()
+    instance, client, _ = runtime(tmp_path, provider=provider)
+    action = ComputerAction.from_envelope(envelope())
+    observation = instance.reconcile_unknown(action)
+    assert observation["uia_tree"]["name"] == "ok"
+    assert provider.observations == 1
+    assert provider.calls == 0
+
+class _FakeLocator:
+    def __init__(self, *, count_value=1, text="", visible=True):
+        self._count = count_value
+        self._text = text
+        self._visible = visible
+        self.clicks = 0
+        self.value = ""
+
+    def count(self):
+        return self._count
+
+    def click(self, **kwargs):
+        self.clicks += 1
+
+    def fill(self, value, **kwargs):
+        self.value = value
+
+    def input_value(self, **kwargs):
+        return self.value
+
+    def inner_text(self, **kwargs):
+        return self._text
+
+    def is_visible(self):
+        return self._visible
+
+
+class _FakePage:
+    def __init__(self, *, url="https://app.example/form", body="", after_text=None):
+        self.url = url
+        self.body = body
+        self.after_text = after_text
+        self.locator_calls = []
+
+    def _element(self):
+        return _FakeLocator(text=self.after_text if self.after_text is not None else self.body)
+
+    def locator(self, selector):
+        self.locator_calls.append(selector)
+        return self._element()
+
+    def get_by_role(self, role, name=None):
+        return self._element()
+
+    def get_by_label(self, label):
+        return self._element()
+
+    def get_by_text(self, text):
+        return self._element()
+
+    def get_by_placeholder(self, text):
+        return self._element()
+
+    def title(self):
+        return "Test"
+
+
+def _browser_action(parameters):
+    return ComputerAction.from_envelope(envelope(
+        capability_id="browser.submit", operation="submit", parameters=parameters,
+    ))
+
+
+def test_browser_submit_requires_postcondition_and_click_alone_is_not_success(tmp_path):
+    from device_control.computer.providers.playwright import PlaywrightProvider
+
+    provider = PlaywrightProvider()
+    provider._page = _FakePage(body="no receipt")
+    missing = provider._submit(_browser_action({
+        "locator": {"role": "button", "name": "Send"},
+    }))
+    assert missing.result.status == "failed"
+    assert missing.result.error_code == "postcondition_required"
+
+    unverified = provider._submit(_browser_action({
+        "locator": {"role": "button", "name": "Send"},
+        "postcondition": {"kind": "text_contains", "value": "sent"},
+    }))
+    assert unverified.result.status == "executed_unverified"
+    assert unverified.result.verification["verified"] is False
+
+
+def test_browser_submit_with_receipt_postcondition_succeeds(tmp_path):
+    from device_control.computer.providers.playwright import PlaywrightProvider
+
+    provider = PlaywrightProvider()
+    provider._page = _FakePage(body="submitted receipt RCPT-123")
+    result = provider._submit(_browser_action({
+        "locator": {"role": "button", "name": "Send"},
+        "postcondition": {"kind": "receipt_id", "value": "RCPT-123"},
+    }))
+    assert result.result.status == "succeeded"
+    assert result.result.verification["verified"] is True
+
+
+def test_navigation_wrong_expected_path_is_not_verified():
+    from device_control.computer.providers.playwright import PlaywrightProvider
+
+    provider = PlaywrightProvider()
+    page = _FakePage(url="https://app.example/other")
+    page.goto = lambda *args, **kwargs: None
+    provider._page = page
+    result = provider._navigate(_browser_action({
+        "url": "https://app.example/form",
+        "expected_url_contains": "/form",
+    }))
+    assert result.result.status == "executed_unverified"
+
+def _mutex_worker(started, release):
+    from device_control.computer.session_mutex import DesktopMutex
+
+    mutex = DesktopMutex(0)
+    acquired = mutex.acquire(2.0)
+    started.set()
+    release.wait(5)
+    if acquired:
+        mutex.release()
+
+
+def _ledger_worker(path, index, done):
+    from device_control.computer.ledger import ComputerRunLedger, LedgerEntry
+
+    ledger = ComputerRunLedger(path)
+    ledger.record(LedgerEntry(
+        schema="dc.computer-ledger/v2", tenant_ref="tenant-a",
+        endpoint_id="pc-endpoint-1", idempotency_key=f"cross-{index}",
+        fingerprint=f"fp-{index}", phase="unknown", command_id=f"cmd-{index}",
+        task_ref="task-1", run_ref="run-1",
+    ))
+    done.set()
+
+
+def test_desktop_mutex_is_cross_process_on_windows():
+    import multiprocessing
+    import sys
+
+    if sys.platform != "win32":
+        pytest.skip("Windows named mutex acceptance requires Windows")
+    started = multiprocessing.Event()
+    release = multiprocessing.Event()
+    worker = multiprocessing.Process(target=_mutex_worker, args=(started, release))
+    worker.start()
+    try:
+        assert started.wait(5)
+        from device_control.computer.session_mutex import DesktopMutex
+
+        assert DesktopMutex(0).acquire(0.2) is False
+    finally:
+        release.set()
+        worker.join(5)
+
+
+def test_ledger_cross_process_writes_do_not_lose_updates(tmp_path):
+    import multiprocessing
+
+    path = str(tmp_path / "ledger.json")
+    done_a, done_b = multiprocessing.Event(), multiprocessing.Event()
+    workers = [
+        multiprocessing.Process(target=_ledger_worker, args=(path, 0, done_a)),
+        multiprocessing.Process(target=_ledger_worker, args=(path, 1, done_b)),
+    ]
+    for worker in workers:
+        worker.start()
+    try:
+        assert done_a.wait(10) and done_b.wait(10)
+    finally:
+        for worker in workers:
+            worker.join(5)
+    ledger = ComputerRunLedger(path)
+    assert len(ledger.unresolved()) == 2
+
+def test_evidence_upload_failure_does_not_replay_action(tmp_path):
+    instance, client, provider = runtime(tmp_path)
+    client.upload_evidence = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("disk full"))
+    instance.run_once()
+    assert provider.calls == 1
+    assert client.results[0][1]["status"] == "succeeded"
+    assert client.results[0][1]["evidence_refs"] == []
+    instance.run_once()
+    assert provider.calls == 1

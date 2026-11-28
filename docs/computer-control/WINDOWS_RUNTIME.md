@@ -68,6 +68,36 @@ to resume.
   containing password/token/credential/cookie/authorization.
 - Ledger stores references/status only, never nonce/token/lease credential.
 
+## Reliability hardening (DC-COMPUTER-002)
+
+- Ledger is now `dc.computer-ledger/v2`, keyed by
+  `tenant | endpoint | task | run | idempotency_key`.
+- Unresolved records (`executing`, `unknown`, `uncertain`, `recovering`) are
+  never evicted; at capacity new records fail closed before dispatch.
+- Ledger writes use a cross-process file lock and atomic fsync/replace.
+- Desktop input is guarded by a Windows named mutex scoped to the interactive
+  session (`DesktopMutex`); independent Runtime processes cannot drive the same
+  desktop concurrently.
+- Browser submit requires a typed business postcondition; click alone is
+  `executed_unverified`. Navigation can require an expected host/path.
+- Provider exceptions after write dispatch become `uncertain` and require
+  observation-only reconciliation.
+- MindOS TaskRun does not offer an ordinary retry for unknown; a new attempt
+  requires a new task/run/key and approval.
+
+## Windows lifecycle / ACL notes
+
+- Run the Runtime in the signed-in interactive user session, not as a
+  non-interactive Windows service. A service cannot safely operate the user's
+  desktop.
+- Store the gateway credential in Windows Credential Manager/DPAPI; never in
+  config, CLI args or logs.
+- Restrict ledger, pause and health files to the interactive user's profile
+  (`%LOCALAPPDATA%\MindOS\ComputerControl`) via NTFS ACL.
+- Install/upgrade/uninstall lifecycle and RDP/disconnect tests require a
+  dedicated Windows 11 test PC and are not executed here.
+
+
 ## Not implemented / blocked
 
 - Live UIA tests require `uiautomation` and an interactive desktop; not present

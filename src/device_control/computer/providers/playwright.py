@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -77,6 +78,13 @@ class PlaywrightProvider:
                 return self._submit(action)
             return self._failed("unsupported_capability")
         except Exception as exc:  # noqa: BLE001 - provider isolation
+            if capability == "browser.submit":
+                return ProviderExecution(ComputerResult(
+                    status="uncertain", provider_status="submit_exception",
+                    error_code=type(exc).__name__,
+                    error_message="submit failed after possible dispatch; reconcile",
+                    reconcile_required=True,
+                ))
             return self._failed(f"playwright_{type(exc).__name__}")
 
     def cancel(self, command_id: str) -> dict[str, Any]:
@@ -108,9 +116,13 @@ class PlaywrightProvider:
         if self.allowed_hosts and parsed.hostname.lower() not in self.allowed_hosts:
             return self._failed("host_not_allowlisted")
         self._page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
+        expected = str(action.parameters.get("expected_url_contains") or "")
+        verified = not expected or expected in self._page.url
         return ProviderExecution(ComputerResult(
-            status="succeeded", provider_status="navigated",
-            verification={"verified": self._page.url.startswith(parsed.scheme), "method": "url_check"},
+            status="succeeded" if verified else "executed_unverified",
+            provider_status="navigated",
+            verification={"verified": verified,
+                          "method": "expected_host_or_path" if expected else "navigation_dispatched"},
             output={"url": self._page.url[:500], "title": self._page.title()[:200]},
         ))
 
@@ -134,9 +146,9 @@ class PlaywrightProvider:
             return self._failed("sensitive_text_blocked")
         locator = dict(action.parameters.get("locator") or {})
         value = str(action.parameters.get("value") or "")
-        element = self._locator(locator)
+        element = self._unique_locator(locator)
         if element is None:
-            return self._failed("locator_missing")
+            return self._failed("locator_missing_or_ambiguous")
         element.fill(value, timeout=self.timeout_ms)
         actual = str(element.input_value(timeout=self.timeout_ms))
         return ProviderExecution(ComputerResult(
@@ -148,21 +160,54 @@ class PlaywrightProvider:
 
     def _submit(self, action: ComputerAction) -> ProviderExecution:
         locator = dict(action.parameters.get("locator") or {})
-        element = self._locator(locator)
+        postcondition = action.parameters.get("postcondition")
+        if not isinstance(postcondition, dict) or not postcondition.get("kind"):
+            return self._failed("postcondition_required")
+        element = self._unique_locator(locator)
         if element is None:
-            return self._failed("locator_missing")
+            return self._failed("locator_missing_or_ambiguous")
         before = self._page.url
         element.click(timeout=self.timeout_ms)
-        try:
-            self._page.wait_for_load_state("domcontentloaded", timeout=5_000)
-        except Exception:  # noqa: BLE001 - SPA submit may not navigate
-            ...
-        after = self._page.url
+        verified, detail = self._verify_postcondition(postcondition)
         return ProviderExecution(ComputerResult(
-            status="succeeded", provider_status="submitted",
-            verification={"verified": True, "method": "click_postcondition"},
-            output={"url_changed": before != after},
+            status="succeeded" if verified else "executed_unverified",
+            provider_status="submitted" if verified else "submit_unverified",
+            verification={"verified": verified, "method": "business_postcondition",
+                          "detail": detail[:240]},
+            output={"url_changed": before != self._page.url},
         ))
+
+    def _verify_postcondition(self, postcondition: dict[str, Any]) -> tuple[bool, str]:
+        kind = str(postcondition.get("kind") or "")
+        value = str(postcondition.get("value") or "")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                if kind == "url_matches" and value and value in self._page.url:
+                    return True, "url matched"
+                if kind in {"text_contains", "receipt_id"} and value:
+                    text = self._page.locator("body").inner_text(timeout=2_000)
+                    if value in text:
+                        return True, "expected text present"
+                if kind == "selector_visible":
+                    target = self._unique_locator(dict(postcondition.get("locator") or {}))
+                    if target is not None and target.is_visible():
+                        return True, "expected element visible"
+            except Exception:  # noqa: BLE001 - postcondition still pending
+                ...
+            time.sleep(0.25)
+        return False, "postcondition not observed"
+
+    def _unique_locator(self, locator: dict[str, Any]):
+        element = self._locator(locator)
+        if element is None:
+            return None
+        try:
+            if element.count() != 1:
+                return None
+        except Exception:  # noqa: BLE001 - count unsupported for some locators
+            return None
+        return element
 
     def _locator(self, locator: dict[str, Any]):
         if not locator:
