@@ -378,6 +378,119 @@
         ]
       }
     },
+    "/v1/approvals/{approval_id}/nonce": {
+      "get": {
+        "description": "Server-to-server, scoped nonce retrieval for an approved action.\n\nThe nonce is never logged or persisted by the consumer and remains\nsingle-use at command consumption. Disabled/expired/wrong-scope approvals\nfail closed.",
+        "operationId": "approval_nonce_v1_approvals__approval_id__nonce_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "approval_id",
+            "required": true,
+            "schema": {
+              "title": "Approval Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "endpoint_id",
+            "required": true,
+            "schema": {
+              "title": "Endpoint Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "capability_id",
+            "required": true,
+            "schema": {
+              "title": "Capability Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "task_ref",
+            "required": true,
+            "schema": {
+              "title": "Task Ref",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "run_ref",
+            "required": true,
+            "schema": {
+              "title": "Run Ref",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenant_ref",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tenant Ref"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Approval Nonce V1 Approvals  Approval Id  Nonce Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Approval Nonce",
+        "tags": [
+          "approvals"
+        ]
+      }
+    },
     "/v1/audit": {
       "get": {
         "operationId": "audit_v1_audit_get",
@@ -664,6 +777,118 @@
           }
         },
         "summary": "Submit Command",
+        "tags": [
+          "commands"
+        ]
+      }
+    },
+    "/v1/commands/by-idempotency": {
+      "get": {
+        "operationId": "command_by_idempotency_v1_commands_by_idempotency_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "endpoint_id",
+            "required": true,
+            "schema": {
+              "title": "Endpoint Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "capability_id",
+            "required": true,
+            "schema": {
+              "title": "Capability Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "idempotency_key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "task_ref",
+            "required": true,
+            "schema": {
+              "title": "Task Ref",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "run_ref",
+            "required": true,
+            "schema": {
+              "title": "Run Ref",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tenant_ref",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tenant Ref"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Command By Idempotency V1 Commands By Idempotency Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Command By Idempotency",
         "tags": [
           "commands"
         ]

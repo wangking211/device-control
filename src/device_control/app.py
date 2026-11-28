@@ -771,6 +771,53 @@ def decide_approval(
     )
 
 
+@app.get("/v1/approvals/{approval_id}/nonce", tags=["approvals"])
+def approval_nonce(
+    approval_id: str,
+    endpoint_id: str,
+    capability_id: str,
+    task_ref: str,
+    run_ref: str,
+    tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Server-to-server, scoped nonce retrieval for an approved action.
+
+    The nonce is never logged or persisted by the consumer and remains
+    single-use at command consumption. Disabled/expired/wrong-scope approvals
+    fail closed.
+    """
+
+    principal = _require_scope(authorization, identity.SCOPE_APPROVAL_DECIDE)
+    tenant = _tenant(principal, tenant_ref)
+    approval = store.get_approval(tenant, approval_id)
+    if approval is None:
+        raise hidden()
+    if approval.get("status") != "approved" or approval.get("consumed_at"):
+        raise conflict("approval_not_available")
+    if str(approval.get("expires_at") or "") <= store.iso():
+        raise conflict("approval_expired")
+    if str(approval.get("endpoint_id") or "") != endpoint_id:
+        raise hidden()
+    if str(approval.get("capability_id") or "") != capability_id:
+        raise conflict("approval_capability_mismatch")
+    lease = store.get_lease(tenant, str(approval.get("lease_id") or ""))
+    if lease is None or not lease.get("active"):
+        raise conflict("approval_lease_inactive")
+    if str(lease.get("task_ref") or "") != task_ref or str(lease.get("run_ref") or "") != run_ref:
+        raise hidden()
+    store.record_approval_nonce_access(
+        tenant, approval_id, actor=principal.subject,
+        actor_type=principal.principal_type,
+    )
+    return {
+        "approval_id": approval_id,
+        "approval_nonce": approval.get("approval_nonce"),
+        "expires_at": approval.get("expires_at"),
+        "single_use": True,
+    }
+
+
 @app.post("/v1/approvals/{approval_id}/consume", tags=["approvals"])
 def consume_approval(
     approval_id: str, payload: dict[str, Any], authorization: str | None = Header(default=None)
@@ -1218,6 +1265,30 @@ def commands(
         item["provider_status"] = item.get("provider_status") or item.get("status")
         item["canonical_status"] = status_projection.project_status(item)
     return {"items": items}
+
+
+@app.get("/v1/commands/by-idempotency", tags=["commands"])
+def command_by_idempotency(
+    endpoint_id: str,
+    capability_id: str,
+    idempotency_key: str,
+    task_ref: str,
+    run_ref: str,
+    tenant_ref: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    principal = _require_scope(authorization, identity.SCOPE_COMMAND_READ)
+    tenant = _tenant(principal, tenant_ref)
+    _enforce_endpoint_scope(principal, endpoint_id)
+    command = store.find_command_by_idempotency(
+        tenant, endpoint_id, capability_id, idempotency_key,
+        task_ref=task_ref, run_ref=run_ref,
+    )
+    if command is None:
+        raise hidden()
+    command["provider_status"] = command.get("provider_status") or command["status"]
+    command["canonical_status"] = status_projection.project_status(command)
+    return command
 
 
 @app.get("/v1/commands/{command_id}", tags=["commands"])

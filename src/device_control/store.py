@@ -1456,6 +1456,22 @@ def get_approval(tenant: str, approval_id: str) -> dict[str, Any] | None:
     return _approval(row) if row else None
 
 
+def record_approval_nonce_access(tenant: str, approval_id: str, *,
+                                 actor: str, actor_type: str) -> None:
+    """Audit a nonce retrieval without recording the nonce value."""
+
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            _audit(
+                tx, tenant=tenant, actor=actor, actor_type=actor_type,
+                action="approval.nonce_access", resource_type="device_approval",
+                resource_id=approval_id, outcome="allowed",
+            )
+    finally:
+        db.close()
+
+
 def decide_approval(
     *,
     tenant: str,
@@ -1655,7 +1671,8 @@ def consume_approval(
 
 
 def find_command_by_idempotency(
-    tenant: str, endpoint_id: str, capability_id: str, idempotency_key: str
+    tenant: str, endpoint_id: str, capability_id: str, idempotency_key: str,
+    *, task_ref: str | None = None, run_ref: str | None = None,
 ) -> dict[str, Any] | None:
     db = connect()
     try:
@@ -1666,7 +1683,14 @@ def find_command_by_idempotency(
         ).fetchone()
     finally:
         db.close()
-    return _command(row) if row else None
+    if row is None:
+        return None
+    command = _command(row)
+    if task_ref is not None and str(command.get("task_ref") or "") != task_ref:
+        return None
+    if run_ref is not None and str(command.get("run_ref") or "") != run_ref:
+        return None
+    return command
 
 
 def get_command(tenant: str, command_id: str) -> dict[str, Any] | None:
@@ -1895,6 +1919,9 @@ def authorize_command(
             ).fetchone()
             if existing is not None:
                 command = _command(existing)
+                if (str(command.get("task_ref") or "") != str(task_ref or "")
+                        or str(command.get("run_ref") or "") != str(run_ref or "")):
+                    raise conflict("idempotency_scope_mismatch")
                 if command["payload_hash"] != payload_hash:
                     raise conflict("idempotency_conflict")
                 return {"command": command, "deduplicated": True}
