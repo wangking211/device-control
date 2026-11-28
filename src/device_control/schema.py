@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-LATEST_VERSION = 11
+LATEST_VERSION = 12
 
 
 @dataclass(frozen=True)
@@ -385,6 +385,14 @@ MIGRATIONS: tuple[Migration, ...] = (    Migration(
             " updated_at TEXT NOT NULL)",
             "CREATE INDEX IF NOT EXISTS ix_ha_ingest_state_tenant "
             "ON ha_ingest_state(tenant_ref, platform_instance_id)",
+        ),
+    ),
+    Migration(
+        12,
+        "dc014_ha_single_writer_owner",
+        (
+            "ALTER TABLE ha_ingest_state ADD COLUMN owner_ref TEXT",
+            "ALTER TABLE ha_ingest_state ADD COLUMN owner_lease_until TEXT",
         ),
     ),
 )

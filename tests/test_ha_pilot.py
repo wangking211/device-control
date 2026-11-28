@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from device_gateway.control_client import ControlPlaneClient
 from fastapi.testclient import TestClient
 from support import (
+    BINDING_KEY,
     acquire_lease,
     admin_token,
     agent_token,
@@ -105,7 +106,7 @@ def worker_command(**overrides):
         "capability_id": "light.turn_on", "capability_version": "1.0.0",
         "operation": "turn_on", "parameters": {"entity_id": "light.kitchen",
                                                "expected_state": "on"},
-        "state_hash": None, "state_version": None,
+        "state_hash": None, "state_version": None, "binding_revision": 1,
         "lease_id": "lease-1", "approval_id": "appr-1", "approval_nonce": "nonce-1",
         "policy_decision": "ask",
     }
@@ -279,7 +280,8 @@ def test_home_assistant_pilot_command_executes_and_verifies(tmp_path, monkeypatc
     assert document.status_code == 200, document.text
     bindings = BindingRegistry(
         tenant_ref="tenant-a", gateway_id=created["gateway_id"],
-        platform_instance_id="ha-1",
+        platform_instance_id="ha-1", verification_key=BINDING_KEY,
+        key_id="test-binding-key-1",
     )
     bindings.load_document(document.json())
     worker = HomeAssistantPilotWorker(

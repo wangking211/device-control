@@ -1,0 +1,52 @@
+{
+  "pack": "DC-014-CLOSE",
+  "date": "2026-11-28",
+  "baseline": {
+    "device-control": {
+      "branch": "main",
+      "sha": "d341ebbb43f4fd213ab342cadc23e7f95567d20e",
+      "origin_main": "d341ebbb43f4fd213ab342cadc23e7f95567d20e",
+      "dirty": false
+    },
+    "mind-os": {
+      "branch": "main",
+      "sha": "300fb06e77e5828ee09ad9314c4a97b56bd05dca",
+      "origin_main": "300fb06e77e5828ee09ad9314c4a97b56bd05dca",
+      "dirty": false,
+      "untracked": [
+        ".local-dev/",
+        "docs/mind-os/05-enterprise/DEVICE_CONTROL_D0_AUDIT_20261126.md"
+      ]
+    }
+  },
+  "environment": {
+    "gh_cli": "unavailable",
+    "github_token": "unavailable",
+    "docker": "unavailable",
+    "adb": "unavailable",
+    "home_assistant": "unavailable",
+    "android_device": "unavailable"
+  },
+  "commands": {
+    "device-control": {
+      "pytest": "python -m pytest -q",
+      "ruff": "ruff check src tests gateway",
+      "mypy": "mypy src/device_control gateway/src/device_gateway --ignore-missing-imports --no-site-packages",
+      "bandit": "bandit -c .bandit -r src gateway/src",
+      "pip_audit": "pip-audit -r requirements/audit.txt",
+      "openapi": "python scripts/export_openapi.py"
+    },
+    "mind-os": {
+      "pytest": "python -m pytest -q ../../tests ../../packages/contracts/tests (cwd apps/api-gateway)",
+      "architecture": "python scripts/architecture_guard.py --strict",
+      "convergence": "python scripts/repository_convergence_check.py",
+      "source_release": "python scripts/source_release_check.py --check --tracked-only",
+      "source_truth": "python scripts/generate_source_truth.py --check"
+    }
+  },
+  "result": {
+    "device-control_before_close": "208 passed",
+    "mind-os_before_close": "610 passed, 1 skipped",
+    "remote_ci": "BLOCKED: no GitHub access, cannot read run/job logs"
+  }
+}

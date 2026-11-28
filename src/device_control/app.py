@@ -1476,6 +1476,7 @@ def _envelope(command: dict[str, Any]) -> dict[str, Any]:
         "endpoint_id": command["endpoint_id"],
         "gateway_id": command["gateway_id"],
         "platform_instance_id": command.get("platform_instance_id"),
+        "binding_revision": store.binding_revision(command.get("binding_updated_at")),
         "task_ref": command.get("task_ref"),
         "run_ref": command.get("run_ref"),
         "correlation_id": command.get("correlation_id"),

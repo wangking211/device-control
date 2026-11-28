@@ -9,6 +9,8 @@ their audit/outbox records in that same transaction.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import secrets
 import sqlite3
@@ -20,11 +22,18 @@ from device_control import commands as command_rules
 from device_control import config, policy, schema
 from device_control.canonical import (
     approval_binding_digest,
+    canonical_json,
     command_payload_hash,
     digest_object,
     sha256_hex,
 )
-from device_control.errors import DeviceControlError, conflict, hidden, invalid
+from device_control.errors import (
+    DeviceControlError,
+    conflict,
+    dependency_unavailable,
+    hidden,
+    invalid,
+)
 
 EVENT_VERSION = "1"
 MAX_LIST_LIMIT = 200
@@ -1247,6 +1256,12 @@ def release_lease(tenant: str, lease_id: str, *, actor: str | None = None,
                     " WHERE lease_id=? AND tenant_ref=? AND status IN ('pending','approved')",
                     (lease_id, tenant),
                 )
+                _audit(
+                    tx, tenant=tenant, actor=actor, actor_type="principal",
+                    action="lease.release", resource_type="device_lease",
+                    resource_id=lease_id, outcome="released",
+                    detail={"reason": reason},
+                )
                 _event(
                     tx,
                     tenant=tenant,
@@ -2050,7 +2065,9 @@ def dispatch_commands(tenant: str, gateway_id: str, *, limit: int = 10) -> list[
             rows = tx.execute(
                 "SELECT c.*, (SELECT d.platform_instance_id FROM iot_devices d"
                 " WHERE d.device_id=c.device_id AND d.tenant_ref=c.tenant_ref)"
-                " AS platform_instance_id FROM device_commands c"
+                " AS platform_instance_id, (SELECT d.updated_at FROM iot_devices d"
+                " WHERE d.device_id=c.device_id AND d.tenant_ref=c.tenant_ref)"
+                " AS binding_updated_at FROM device_commands c"
                 " WHERE c.gateway_id=? AND c.tenant_ref=?"
                 " AND c.status='queued' AND c.deadline>? ORDER BY c.created_at LIMIT ?",
                 (gateway_id, tenant, timestamp, _list_limit(limit)),
@@ -2069,7 +2086,9 @@ def dispatch_commands(tenant: str, gateway_id: str, *, limit: int = 10) -> list[
                 dispatched.append(_command(tx.execute(
                     "SELECT c.*, (SELECT d.platform_instance_id FROM iot_devices d"
                     " WHERE d.device_id=c.device_id AND d.tenant_ref=c.tenant_ref)"
-                    " AS platform_instance_id FROM device_commands c WHERE c.command_id=?",
+                    " AS platform_instance_id, (SELECT d.updated_at FROM iot_devices d"
+                    " WHERE d.device_id=c.device_id AND d.tenant_ref=c.tenant_ref)"
+                    " AS binding_updated_at FROM device_commands c WHERE c.command_id=?",
                     (command["command_id"],),
                 ).fetchone()))
     finally:
@@ -2587,13 +2606,30 @@ def claim_iot_device(*, tenant: str, device_id: str, capability_ids: list[str],
     return get_iot_device(tenant, device_id) or {}
 
 
-def gateway_binding_document(tenant: str, gateway_id: str, *,
-                             ttl_seconds: float = 300.0) -> dict[str, Any]:
-    """Control-plane issued binding snapshot for one edge gateway.
+def binding_revision(updated_at: str | None) -> int:
+    """Deterministic binding revision from the authoritative device row."""
 
-    Only claimed devices with a materialized endpoint are included. The revision
-    is derived from the authoritative ``updated_at`` so claim, capability and
-    revocation changes invalidate an edge cache deterministically.
+    value = str(updated_at or "").strip()
+    if not value:
+        return 0
+    parsed = parse_timestamp(value)
+    return max(1, int(parsed.timestamp() * 1_000_000))
+
+
+def _binding_document_signature(document: dict[str, Any], key: str) -> str:
+    payload = {k: v for k, v in document.items()
+               if k not in {"signature", "signature_algorithm"}}
+    return hmac.new(key.encode("utf-8"), canonical_json(payload).encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def gateway_binding_document(tenant: str, gateway_id: str, *,
+                             ttl_seconds: float | None = None) -> dict[str, Any]:
+    """Signed, versioned binding snapshot for one edge gateway.
+
+    Only claimed devices with a materialized endpoint are included. The
+    signature covers tenant/gateway/platform, revisions, bindings and validity
+    so the edge can reject forged, cross-scope, expired or replayed documents.
     """
 
     gateway = get_gateway(tenant, gateway_id)
@@ -2601,6 +2637,10 @@ def gateway_binding_document(tenant: str, gateway_id: str, *,
         raise hidden()
     if gateway["status"] not in {"online", "degraded"}:
         raise conflict("gateway_not_online")
+    key = config.binding_signing_key()
+    key_id = config.binding_key_id()
+    if len(key.encode("utf-8")) < 32 or not key_id:
+        raise dependency_unavailable("binding_signing_not_configured")
     db = connect()
     try:
         platform_row = db.execute(
@@ -2623,8 +2663,7 @@ def gateway_binding_document(tenant: str, gateway_id: str, *,
                         if item.get("capability_id")]
         if not endpoint_id or not capabilities:
             continue
-        updated_at = parse_timestamp(str(device.get("updated_at") or ""))
-        revision = int(updated_at.timestamp() * 1_000_000) if updated_at else 0
+        revision = binding_revision(str(device.get("updated_at") or ""))
         bindings.append({
             "entity_id": device["native_id"],
             "device_id": device["device_id"],
@@ -2635,15 +2674,25 @@ def gateway_binding_document(tenant: str, gateway_id: str, *,
         })
     if not bindings:
         raise conflict("no_claimed_devices")
-    return {
+    effective_ttl = ttl_seconds if ttl_seconds is not None else float(
+        config.binding_document_ttl_seconds()
+    )
+    document: dict[str, Any] = {
+        "schema": "dc-binding-document/v1",
         "tenant_ref": tenant,
         "gateway_id": gateway_id,
         "platform_instance_id": platform["platform_instance_id"],
+        "revision": max(item["revision"] for item in bindings),
+        "nonce": secrets.token_urlsafe(18),
         "issued_at": iso(now),
-        "valid_until": iso(now + timedelta(seconds=max(30.0, ttl_seconds))),
+        "valid_until": iso(now + timedelta(seconds=max(30.0, effective_ttl))),
         "source": "control-plane",
         "bindings": bindings,
+        "key_id": key_id,
     }
+    document["signature_algorithm"] = "hmac-sha256"
+    document["signature"] = _binding_document_signature(document, key)
+    return document
 
 
 def set_iot_device_endpoint(tenant: str, device_id: str, endpoint_id: str) -> None:
@@ -3007,6 +3056,49 @@ def set_ha_connection(*, tenant: str, platform_instance_id: str, connected: bool
                 " WHERE tenant_ref=? AND platform_instance_id=?",
                 (1 if connected else 0, error, 1 if reconnected else 0, iso(),
                  tenant, platform_instance_id),
+            )
+    finally:
+        db.close()
+
+
+def acquire_ha_ingest_owner(*, tenant: str, platform_instance_id: str,
+                            owner_ref: str, ttl_seconds: float = 900.0) -> bool:
+    """Single-writer guard so two processes do not duplicate subscriptions."""
+
+    if not str(owner_ref or "").strip():
+        return False
+    timestamp = iso()
+    expires = iso(now() + timedelta(seconds=max(30.0, ttl_seconds)))
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            row = _ha_ingest_row(tx, tenant, platform_instance_id)
+            current_owner = str(row["owner_ref"] or "")
+            current_until = parse_timestamp(str(row["owner_lease_until"] or "")) \
+                if row["owner_lease_until"] else None
+            if (current_owner and current_owner != owner_ref
+                    and current_until is not None and current_until > now()):
+                return False
+            tx.execute(
+                "UPDATE ha_ingest_state SET owner_ref=?, owner_lease_until=?,"
+                " updated_at=? WHERE tenant_ref=? AND platform_instance_id=?",
+                (owner_ref, expires, timestamp, tenant, platform_instance_id),
+            )
+            return True
+    finally:
+        db.close()
+
+
+def release_ha_ingest_owner(*, tenant: str, platform_instance_id: str,
+                            owner_ref: str) -> None:
+    db = connect()
+    try:
+        with transaction(db) as tx:
+            tx.execute(
+                "UPDATE ha_ingest_state SET owner_ref=NULL, owner_lease_until=NULL,"
+                " updated_at=? WHERE tenant_ref=? AND platform_instance_id=?"
+                " AND owner_ref=?",
+                (iso(), tenant, platform_instance_id, owner_ref),
             )
     finally:
         db.close()

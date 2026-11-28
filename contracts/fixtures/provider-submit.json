@@ -1,0 +1,17 @@
+{
+  "endpoint_id": "phone-1",
+  "capability_id": "ui.tap",
+  "capability_version": "1.0.0",
+  "input": {"target_ref": "node-1"},
+  "intent": "tap the test control",
+  "deadline": "2026-11-28T12:00:00+00:00",
+  "idempotency_key": "task-1:run-1:ui.tap:0123456789abcdef",
+  "lease_id": "lease-provider-fixture",
+  "approval_id": "appr-provider-fixture",
+  "approval_nonce": "nonce-provider-fixture",
+  "state_hash": "state-1",
+  "state_version": "v1:state-1",
+  "task_ref": "task-1",
+  "run_ref": "run-1",
+  "correlation_id": "task-1:run-1"
+}

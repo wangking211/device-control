@@ -207,6 +207,44 @@ class AuthInvalidWebSocket:
         raise PermissionError("home_assistant_auth_invalid")
 
 
+class NoopWebSocket:
+    reconnects = 0
+
+    def run(self, **kwargs):
+        return 0
+
+
+def test_single_writer_owner_prevents_duplicate_subscription(tmp_path, monkeypatch):
+    entities = setup_platform(tmp_path, monkeypatch)
+    assert store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1", owner_ref="node-a"
+    ) is True
+    standby = pipeline(entities).run(NoopWebSocket(), owner_ref="node-b")
+    assert standby["status"] == "standby"
+    store.release_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1", owner_ref="node-a"
+    )
+    started = pipeline(entities).run(NoopWebSocket(), owner_ref="node-b")
+    assert started["status"] == "stopped"
+
+
+def test_expired_owner_can_be_taken_over(tmp_path, monkeypatch):
+    setup_platform(tmp_path, monkeypatch)
+    assert store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1", owner_ref="node-a"
+    )
+    db = store.connect()
+    db.execute("UPDATE ha_ingest_state SET owner_lease_until=?"
+               " WHERE tenant_ref='tenant-a' AND platform_instance_id='ha-1'",
+               ("2026-01-01T00:00:00+00:00",))
+    db.commit()
+    db.close()
+    assert store.acquire_ha_ingest_owner(
+        tenant="tenant-a", platform_instance_id="ha-1", owner_ref="node-b"
+    ) is True
+
+
+
 def test_auth_invalid_stops_and_is_not_retried(tmp_path, monkeypatch):
     entities = setup_platform(tmp_path, monkeypatch)
     result = pipeline(entities).run(AuthInvalidWebSocket())

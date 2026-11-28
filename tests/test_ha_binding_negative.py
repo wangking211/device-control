@@ -79,6 +79,7 @@ def command(**overrides):
         "parameters": {"entity_id": "light.kitchen", "expected_state": "on"},
         "state_hash": "hash-1",
         "state_version": "v1",
+        "binding_revision": 1,
         "lease_id": "lease-1",
         "approval_id": "appr-1",
         "approval_nonce": "nonce-1",
@@ -188,6 +189,23 @@ def test_stale_binding_revision_is_rejected():
     assert adapter.service_calls == []
 
 
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        (None, "binding_revision_missing"),
+        ("", "binding_revision_missing"),
+        (True, "binding_revision_invalid"),
+        ("not-a-number", "binding_revision_invalid"),
+        (0, "binding_revision_mismatch"),
+    ],
+)
+def test_binding_revision_must_be_exact(value, reason):
+    adapter = RecordingAdapter()
+    outcome = run(registry(), adapter, command(binding_revision=value))
+    assert outcome["reason"] == reason
+    assert adapter.service_calls == []
+
+
 def test_current_binding_revision_is_accepted():
     adapter = RecordingAdapter()
     outcome = run(registry(), adapter, command(binding_revision=1))
@@ -237,16 +255,35 @@ def test_write_with_changed_state_is_rejected_before_service_call():
 
 
 def test_binding_document_scope_must_match_edge():
+    from support import BINDING_KEY
+
     bindings = BindingRegistry(
         tenant_ref="tenant-a", gateway_id="ha-ha-1", platform_instance_id="ha-1",
+        verification_key=BINDING_KEY, key_id="test-binding-key-1",
     )
     document = {
+        "schema": "dc-binding-document/v1",
         "tenant_ref": "tenant-b",
         "gateway_id": "ha-ha-1",
         "platform_instance_id": "ha-1",
+        "revision": 1,
+        "nonce": "nonce-1",
+        "signature_algorithm": "hmac-sha256",
+        "issued_at": datetime.now(timezone.utc).isoformat(),
         "valid_until": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
         "bindings": [],
+        "key_id": "test-binding-key-1",
     }
+    import hashlib
+    import hmac
+
+    from device_control.canonical import canonical_json
+
+    payload = {k: v for k, v in document.items()
+               if k not in {"signature", "signature_algorithm"}}
+    document["signature"] = hmac.new(
+        BINDING_KEY.encode(), canonical_json(payload).encode(), hashlib.sha256
+    ).hexdigest()
     with pytest.raises(Exception) as exc:
         bindings.load_document(document)
     assert getattr(exc.value, "reason", "") == "binding_document_scope_mismatch"

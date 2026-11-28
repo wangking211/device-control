@@ -19,6 +19,7 @@ MANIFEST_DIGEST = gateway_manifest.digest(MANIFEST)
 MANIFEST_VERSION = str(MANIFEST["manifest_version"])
 DEVICE_FINGERPRINT = "test-device-fingerprint"
 REDACTION_KEY = "device-control-test-redaction-key-0123456789"
+BINDING_KEY = "device-control-test-binding-key-0123456789"
 REDACTION_KEY_ID = "test-redaction-key-1"
 
 
@@ -76,6 +77,8 @@ def configure(monkeypatch, tmp_path, *, production: bool = False,
     monkeypatch.setenv("DEVICE_CONTROL_EVIDENCE_DIR", str(tmp_path / "evidence"))
     monkeypatch.setenv("DEVICE_CONTROL_REQUIRE_HTTPS", "false")
     monkeypatch.setenv("DEVICE_CONTROL_REDACTION_HMAC_KEY", REDACTION_KEY)
+    monkeypatch.setenv("DEVICE_CONTROL_BINDING_SIGNING_KEY", BINDING_KEY)
+    monkeypatch.setenv("DEVICE_CONTROL_BINDING_KEY_ID", "test-binding-key-1")
     monkeypatch.delenv("DEVICE_CONTROL_MANIFEST_HMAC_KEY", raising=False)
     if admin_token:
         monkeypatch.setenv("DEVICE_CONTROL_ADMIN_TOKEN", admin_token)

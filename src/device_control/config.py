@@ -95,6 +95,18 @@ def redaction_hmac_key() -> str:
     return os.environ.get("DEVICE_CONTROL_REDACTION_HMAC_KEY", "")
 
 
+def binding_signing_key() -> str:
+    return os.environ.get("DEVICE_CONTROL_BINDING_SIGNING_KEY", "")
+
+
+def binding_key_id() -> str:
+    return (os.environ.get("DEVICE_CONTROL_BINDING_KEY_ID") or "").strip()
+
+
+def binding_document_ttl_seconds() -> int:
+    return _bounded_int("DEVICE_CONTROL_BINDING_TTL_SECONDS", 300, 30, 3600)
+
+
 def require_https() -> bool:
     value = (os.environ.get("DEVICE_CONTROL_REQUIRE_HTTPS") or "").strip().lower()
     return value in {"1", "true", "yes"} or is_production()
@@ -168,6 +180,10 @@ def production_configuration_errors() -> list[str]:
         errors.append("MINDOS_IDENTITY_HMAC_KEY")
     if len(redaction_hmac_key()) < 32:
         errors.append("DEVICE_CONTROL_REDACTION_HMAC_KEY")
+    if len(binding_signing_key()) < 32:
+        errors.append("DEVICE_CONTROL_BINDING_SIGNING_KEY")
+    if not binding_key_id():
+        errors.append("DEVICE_CONTROL_BINDING_KEY_ID")
     if manifest_allow_hmac():
         if len(manifest_hmac_key()) < 32:
             errors.append("DEVICE_CONTROL_MANIFEST_HMAC_KEY")

@@ -14,9 +14,13 @@ grants; a local entity allowlist is never sufficient on its own.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
+
+from ...canonical import canonical_json
 
 CLAIM_FIELDS = (
     "tenant_ref",
@@ -25,6 +29,8 @@ CLAIM_FIELDS = (
     "endpoint_id",
     "device_id",
 )
+
+BINDING_DOCUMENT_SCHEMA = "dc-binding-document/v1"
 
 
 class BindingRejected(Exception):
@@ -87,17 +93,19 @@ class DeviceBinding:
                 raise BindingRejected("claim_field_missing")
             if claimed != getattr(self, field):
                 raise BindingRejected(f"{_reason_for(field)}_mismatch")
-        claimed_revision = command.get("binding_revision")
-        if claimed_revision is not None:
-            try:
-                revision = int(claimed_revision)
-            except (TypeError, ValueError) as exc:
-                raise BindingRejected("binding_revision_invalid") from exc
-            # A lower revision means the edge cached a pre-revocation binding;
-            # a higher one means the command references a binding we do not
-            # have. Both are stale and must be re-resolved.
-            if revision != self.revision:
-                raise BindingRejected("binding_revision_mismatch")
+        raw_revision = command.get("binding_revision")
+        if raw_revision is None or raw_revision == "":
+            raise BindingRejected("binding_revision_missing")
+        if isinstance(raw_revision, bool) or not isinstance(raw_revision, (int, str)):
+            raise BindingRejected("binding_revision_invalid")
+        try:
+            revision = int(raw_revision)
+        except (TypeError, ValueError) as exc:
+            raise BindingRejected("binding_revision_invalid") from exc
+        # Binding revision is an exact match, never a minimum: an older edge
+        # cache and a newer command are both untrustworthy.
+        if revision != self.revision:
+            raise BindingRejected("binding_revision_mismatch")
 
     def assert_capability(self, capability_id: str) -> None:
         if capability_id not in self.capabilities:
@@ -118,6 +126,7 @@ class BindingRegistry:
     """In-memory view of control-plane bindings for one edge scope."""
 
     def __init__(self, *, tenant_ref: str, gateway_id: str, platform_instance_id: str,
+                 verification_key: str | None = None, key_id: str | None = None,
                  clock=None) -> None:
         for value in (tenant_ref, gateway_id, platform_instance_id):
             if not str(value or "").strip():
@@ -125,8 +134,13 @@ class BindingRegistry:
         self.tenant_ref = tenant_ref
         self.gateway_id = gateway_id
         self.platform_instance_id = platform_instance_id
+        self._verification_key = verification_key or ""
+        self._key_id = key_id or ""
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._bindings: dict[str, DeviceBinding] = {}
+        self._seen_nonces: dict[str, str] = {}
+        self._document_revision = 0
+        self._document_digest: str | None = None
 
     def bind(self, *, entity_id: str, endpoint_id: str, device_id: str,
              capabilities: Iterable[str], revision: int | None = None,
@@ -168,11 +182,32 @@ class BindingRegistry:
 
     def load_document(self, document: Mapping[str, Any], *,
                       document_valid_until: str | None = None) -> list[DeviceBinding]:
-        """Load a control-plane binding document.
+        """Verify and atomically load a signed control-plane binding document.
 
-        The document scope must match this edge exactly. Any malformed binding
-        aborts the whole load so a partial document cannot widen access.
+        Any invalid signature, scope, validity, revision, nonce or binding
+        aborts the entire load, so a partially-valid document can never widen
+        edge access.
         """
+
+        key = self._verification_key
+        if len(key.encode("utf-8")) < 32:
+            raise BindingRejected("binding_document_unsigned")
+        if str(document.get("signature_algorithm") or "") != "hmac-sha256":
+            raise BindingRejected("binding_document_unsigned")
+        signature = str(document.get("signature") or "")
+        if not signature:
+            raise BindingRejected("binding_document_unsigned")
+        if self._key_id and str(document.get("key_id") or "") != self._key_id:
+            raise BindingRejected("binding_document_key_mismatch")
+        payload = {name: value for name, value in document.items()
+                   if name not in {"signature", "signature_algorithm"}}
+        expected = hmac.new(
+            key.encode("utf-8"), canonical_json(payload).encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise BindingRejected("binding_document_signature_invalid")
+        if str(document.get("schema") or "") != BINDING_DOCUMENT_SCHEMA:
+            raise BindingRejected("binding_document_invalid")
 
         if str(document.get("tenant_ref") or "") != self.tenant_ref:
             raise BindingRejected("binding_document_scope_mismatch")
@@ -180,15 +215,43 @@ class BindingRegistry:
             raise BindingRejected("binding_document_scope_mismatch")
         if str(document.get("platform_instance_id") or "") != self.platform_instance_id:
             raise BindingRejected("binding_document_scope_mismatch")
+
+        now = self._clock()
+        issued_at = _parse_timestamp(document.get("issued_at"))
         valid_until = _parse_timestamp(
             document_valid_until or str(document.get("valid_until") or "")
         )
-        if valid_until is None:
+        if issued_at is None or valid_until is None:
             raise BindingRejected("binding_document_expiry_missing")
+        if issued_at > now + timedelta(seconds=60):
+            raise BindingRejected("binding_document_not_yet_valid")
+        if now >= valid_until or valid_until <= issued_at:
+            raise BindingRejected("binding_document_expired")
+        nonce = str(document.get("nonce") or "")
+        if not nonce:
+            raise BindingRejected("binding_document_invalid")
+        raw_document_revision = document.get("revision")
+        if isinstance(raw_document_revision, bool) or not isinstance(raw_document_revision, int):
+            raise BindingRejected("binding_revision_invalid")
+        if raw_document_revision < 1:
+            raise BindingRejected("binding_revision_invalid")
+
+        payload_digest = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+        previous_nonce = self._seen_nonces.get(nonce)
+        if previous_nonce is not None:
+            if previous_nonce == payload_digest:
+                return list(self._bindings.values())
+            raise BindingRejected("binding_document_replay")
+        if raw_document_revision < self._document_revision:
+            raise BindingRejected("binding_document_stale")
+        if (raw_document_revision == self._document_revision
+                and self._document_digest not in {None, payload_digest}):
+            raise BindingRejected("binding_document_conflict")
+
         items = document.get("bindings")
         if not isinstance(items, list) or not items:
             raise BindingRejected("binding_document_empty")
-        loaded: list[DeviceBinding] = []
+        pending: dict[str, DeviceBinding] = {}
         for item in items:
             if not isinstance(item, Mapping):
                 raise BindingRejected("binding_document_invalid")
@@ -196,14 +259,13 @@ class BindingRegistry:
             capabilities = item.get("capabilities")
             if not entity_id or not isinstance(capabilities, list) or not capabilities:
                 raise BindingRejected("binding_document_invalid")
+            if entity_id in pending:
+                raise BindingRejected("binding_document_invalid")
             raw_revision = item.get("revision")
-            if not isinstance(raw_revision, (int, str)) or isinstance(raw_revision, bool):
+            if isinstance(raw_revision, bool) or not isinstance(raw_revision, int):
                 raise BindingRejected("binding_revision_invalid")
-            try:
-                revision = int(raw_revision)
-            except (TypeError, ValueError) as exc:
-                raise BindingRejected("binding_revision_invalid") from exc
-            issued_at = _parse_timestamp(item.get("issued_at")) or self._clock()
+            if raw_revision < 1:
+                raise BindingRejected("binding_revision_invalid")
             binding = DeviceBinding(
                 tenant_ref=self.tenant_ref,
                 gateway_id=self.gateway_id,
@@ -212,15 +274,20 @@ class BindingRegistry:
                 device_id=str(item.get("device_id") or ""),
                 entity_id=entity_id,
                 capabilities=frozenset(str(value) for value in capabilities),
-                revision=revision,
-                issued_at=issued_at,
+                revision=raw_revision,
+                issued_at=_parse_timestamp(item.get("issued_at")) or now,
                 valid_until=valid_until,
                 source=str(document.get("source") or "control-plane"),
             )
-            binding.assert_active(self._clock())
-            self._bindings[entity_id] = binding
-            loaded.append(binding)
-        return loaded
+            binding.assert_active(now)
+            pending[entity_id] = binding
+
+        # Commit only after every item validated.
+        self._bindings.update(pending)
+        self._seen_nonces[nonce] = payload_digest
+        self._document_revision = raw_document_revision
+        self._document_digest = payload_digest
+        return list(pending.values())
 
     def snapshot(self) -> list[dict[str, Any]]:
         return [

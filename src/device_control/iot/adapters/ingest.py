@@ -159,7 +159,19 @@ class HomeAssistantEventPipeline:
                 "platform_instance_id": self.platform_instance_id}
 
     def run(self, websocket: HomeAssistantWebSocket, *,
-            stop: Callable[[], bool] | None = None) -> dict[str, Any]:
+            stop: Callable[[], bool] | None = None,
+            owner_ref: str | None = None) -> dict[str, Any]:
+        acquired = False
+        if owner_ref:
+            acquired = store.acquire_ha_ingest_owner(
+                tenant=self.tenant_ref,
+                platform_instance_id=self.platform_instance_id,
+                owner_ref=owner_ref,
+            )
+            if not acquired:
+                # Another process owns this subscription; do not duplicate it.
+                return {"status": "standby", "delivered": 0,
+                        "platform_instance_id": self.platform_instance_id}
         store.set_ha_connection(
             tenant=self.tenant_ref, platform_instance_id=self.platform_instance_id,
             connected=True,
@@ -194,6 +206,12 @@ class HomeAssistantEventPipeline:
                     tenant=self.tenant_ref,
                     platform_instance_id=self.platform_instance_id,
                     connected=False,
+                )
+            if acquired and owner_ref:
+                store.release_ha_ingest_owner(
+                    tenant=self.tenant_ref,
+                    platform_instance_id=self.platform_instance_id,
+                    owner_ref=owner_ref,
                 )
         return {"status": "stopped", "delivered": delivered,
                 "reconnects": websocket.reconnects}
