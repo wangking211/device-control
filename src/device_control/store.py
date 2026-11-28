@@ -2048,8 +2048,11 @@ def dispatch_commands(tenant: str, gateway_id: str, *, limit: int = 10) -> list[
                     (timestamp, command["command_id"]),
                 )
             rows = tx.execute(
-                "SELECT * FROM device_commands WHERE gateway_id=? AND tenant_ref=?"
-                " AND status='queued' AND deadline>? ORDER BY created_at LIMIT ?",
+                "SELECT c.*, (SELECT d.platform_instance_id FROM iot_devices d"
+                " WHERE d.device_id=c.device_id AND d.tenant_ref=c.tenant_ref)"
+                " AS platform_instance_id FROM device_commands c"
+                " WHERE c.gateway_id=? AND c.tenant_ref=?"
+                " AND c.status='queued' AND c.deadline>? ORDER BY c.created_at LIMIT ?",
                 (gateway_id, tenant, timestamp, _list_limit(limit)),
             ).fetchall()
             for row in rows:
@@ -2064,7 +2067,10 @@ def dispatch_commands(tenant: str, gateway_id: str, *, limit: int = 10) -> list[
                     (timestamp, command["command_id"]),
                 )
                 dispatched.append(_command(tx.execute(
-                    "SELECT * FROM device_commands WHERE command_id=?", (command["command_id"],)
+                    "SELECT c.*, (SELECT d.platform_instance_id FROM iot_devices d"
+                    " WHERE d.device_id=c.device_id AND d.tenant_ref=c.tenant_ref)"
+                    " AS platform_instance_id FROM device_commands c WHERE c.command_id=?",
+                    (command["command_id"],),
                 ).fetchone()))
     finally:
         db.close()
@@ -2094,11 +2100,19 @@ def record_command_progress(
             if command["gateway_id"] != gateway_id:
                 raise hidden()
             if command["status"] == status:
+                tx.execute(
+                    "UPDATE device_commands SET provider_status=? WHERE command_id=?",
+                    (status, command_id),
+                )
                 return {"command_id": command_id, "status": status, "deduplicated": True}
             updated = _advance_tx(
                 tx, command=command, target=status, reason="gateway_progress",
                 actor=gateway_id, actor_type="gateway", event_type="command.progress",
                 payload=detail or {},
+            )
+            tx.execute(
+                "UPDATE device_commands SET provider_status=? WHERE command_id=?",
+                (status, command_id),
             )
             return {"command_id": command_id, "status": updated["status"], "deduplicated": False}
     finally:
@@ -2183,7 +2197,8 @@ def record_command_result(
             evidence = command_rules.redact_evidence(evidence_refs)
             tx.execute(
                 "UPDATE device_commands SET result_json=?, verification_json=?,"
-                " evidence_refs_json=?, completed_at=?, updated_at=?, status_reason=?"
+                " evidence_refs_json=?, completed_at=?, updated_at=?, status_reason=?,"
+                " provider_status=?"
                 " WHERE command_id=?",
                 (
                     json.dumps(result, sort_keys=True) if result is not None else None,
@@ -2192,6 +2207,7 @@ def record_command_result(
                     timestamp,
                     timestamp,
                     effective_reason,
+                    status,
                     command_id,
                 ),
             )
@@ -2569,6 +2585,65 @@ def claim_iot_device(*, tenant: str, device_id: str, capability_ids: list[str],
     finally:
         db.close()
     return get_iot_device(tenant, device_id) or {}
+
+
+def gateway_binding_document(tenant: str, gateway_id: str, *,
+                             ttl_seconds: float = 300.0) -> dict[str, Any]:
+    """Control-plane issued binding snapshot for one edge gateway.
+
+    Only claimed devices with a materialized endpoint are included. The revision
+    is derived from the authoritative ``updated_at`` so claim, capability and
+    revocation changes invalidate an edge cache deterministically.
+    """
+
+    gateway = get_gateway(tenant, gateway_id)
+    if gateway is None:
+        raise hidden()
+    if gateway["status"] not in {"online", "degraded"}:
+        raise conflict("gateway_not_online")
+    db = connect()
+    try:
+        platform_row = db.execute(
+            "SELECT * FROM platform_instances WHERE gateway_id=? AND tenant_ref=?",
+            (gateway_id, tenant),
+        ).fetchone()
+    finally:
+        db.close()
+    if platform_row is None:
+        raise conflict("platform_instance_missing")
+    platform = _platform(platform_row)
+    devices = list_iot_devices(
+        tenant, platform_instance_id=platform["platform_instance_id"], trust_state="claimed"
+    )
+    now = datetime.now(timezone.utc)
+    bindings: list[dict[str, Any]] = []
+    for device in devices:
+        endpoint_id = device.get("endpoint_id")
+        capabilities = [str(item.get("capability_id")) for item in device.get("capabilities", [])
+                        if item.get("capability_id")]
+        if not endpoint_id or not capabilities:
+            continue
+        updated_at = parse_timestamp(str(device.get("updated_at") or ""))
+        revision = int(updated_at.timestamp() * 1_000_000) if updated_at else 0
+        bindings.append({
+            "entity_id": device["native_id"],
+            "device_id": device["device_id"],
+            "endpoint_id": endpoint_id,
+            "capabilities": capabilities,
+            "revision": max(1, revision),
+            "issued_at": iso(now),
+        })
+    if not bindings:
+        raise conflict("no_claimed_devices")
+    return {
+        "tenant_ref": tenant,
+        "gateway_id": gateway_id,
+        "platform_instance_id": platform["platform_instance_id"],
+        "issued_at": iso(now),
+        "valid_until": iso(now + timedelta(seconds=max(30.0, ttl_seconds))),
+        "source": "control-plane",
+        "bindings": bindings,
+    }
 
 
 def set_iot_device_endpoint(tenant: str, device_id: str, endpoint_id: str) -> None:

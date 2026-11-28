@@ -2,8 +2,12 @@
 
 The worker only translates already-authorized command envelopes to the HA
 adapter. It does not decide policy, leases or approvals; the control plane does.
-It enforces a local entity/capability allowlist, compares the observed state hash
-before a write, and posts explicit verification.
+Before any read or write it resolves a trusted, versioned device binding and
+compares tenant, gateway, platform instance, endpoint, device, native entity and
+capability grant. Every field is mandatory: a partial envelope is rejected, not
+silently skipped. Writes additionally require an active lease, an approval
+nonce and the upstream ``ask`` decision, and are only executed when the observed
+state still matches the approved state hash/version.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from .. import ha_pilot
+from .binding import BindingRegistry, BindingRejected
 from .home_assistant_adapter import HomeAssistantAdapter
 
 
@@ -31,9 +36,7 @@ class ControlClient(Protocol):
 class HomeAssistantPilotWorker:
     client: ControlClient
     adapter: HomeAssistantAdapter
-    allowed_entities: set[str]
-    entity_bindings: dict[str, dict[str, Any]] | None = None
-    platform_instance_id: str | None = None
+    bindings: BindingRegistry
     max_state_age_seconds: float = 15.0
 
     def run_once(self, limit: int = 10) -> dict[str, int]:
@@ -45,49 +48,49 @@ class HomeAssistantPilotWorker:
         return {"pulled": len(commands), "executed": executed}
 
     def _execute(self, command: dict[str, Any]) -> None:
-        command_id = str(command["command_id"])
-        capability_id = str(command["capability_id"])
+        command_id = str(command.get("command_id") or "")
+        if not command_id:
+            return
+        capability_id = str(command.get("capability_id") or "")
         parameters = command.get("parameters") or {}
+        if not isinstance(parameters, dict):
+            self._reject(command_id, "parameters_invalid")
+            return
         entity_id = str(parameters.get("entity_id") or "")
+        if not entity_id:
+            self._reject(command_id, "entity_missing")
+            return
         if capability_id not in ha_pilot.CAPABILITY_IDS:
             self._reject(command_id, "capability_not_allowlisted")
             return
-        if entity_id not in self.allowed_entities:
-            self._reject(command_id, "entity_not_allowlisted")
+        try:
+            binding = self.bindings.resolve(entity_id)
+            binding.assert_claims(command)
+            binding.assert_capability(capability_id)
+        except BindingRejected as exc:
+            self._reject(command_id, exc.reason)
             return
-        if command.get("gateway_id") != self.client.gateway_id:  # type: ignore[attr-defined]
-            self._reject(command_id, "gateway_mismatch")
+
+        is_read = capability_id in ha_pilot.READ_CAPABILITIES
+        if not self._check_authorization(command, is_read=is_read):
             return
-        binding = (self.entity_bindings or {}).get(entity_id)
-        if self.entity_bindings is not None and binding is None:
-            self._reject(command_id, "entity_mapping_missing")
-            return
-        if binding:
-            if command.get("endpoint_id") and command["endpoint_id"] != binding.get("endpoint_id"):
-                self._reject(command_id, "endpoint_mapping_mismatch")
-                return
-            if command.get("device_id") and command["device_id"] != binding.get("device_id"):
-                self._reject(command_id, "device_mapping_mismatch")
-                return
-            if self.platform_instance_id and binding.get("platform_instance_id") != self.platform_instance_id:
-                self._reject(command_id, "platform_instance_mismatch")
-                return
+
         try:
             before = self.adapter.observe(entity_id)
         except Exception as exc:  # noqa: BLE001 - adapter/transport failure
             self._result(command_id, status="failed", reason=type(exc).__name__,
                          error_class="unavailable")
             return
-        if capability_id not in ha_pilot.READ_CAPABILITIES:
-            if not self._check_write_state(command, before):
-                return
-        if capability_id in ha_pilot.READ_CAPABILITIES:
+        if is_read:
             self._result(
                 command_id, status="succeeded",
-                verification=self._verification(before, "read_after_write"),
+                verification=self._verification(before, "sensor_observation"),
                 output={"state": before.properties.get("state")},
             )
             return
+        if not self._check_write_state(command, before):
+            return
+
         self.client.progress(command_id, "accepted")
         self.client.progress(command_id, "executing")
         mapped = ha_pilot.native_command(capability_id, parameters)
@@ -113,6 +116,30 @@ class HomeAssistantPilotWorker:
             verification=self._verification(observed, "read_after_write"),
             output={"state": observed.properties.get("state") if observed else None},
         )
+
+    def _check_authorization(self, command: dict[str, Any], *, is_read: bool) -> bool:
+        """Require control-plane authority; an envelope cannot self-authorize."""
+
+        command_id = str(command["command_id"])
+        decision = command.get("policy_decision")
+        if is_read:
+            if decision != "allow":
+                self._reject(command_id, "policy_decision_mismatch")
+                return False
+            return True
+        if decision != "ask":
+            self._reject(command_id, "policy_decision_mismatch")
+            return False
+        if not str(command.get("lease_id") or "").strip():
+            self._reject(command_id, "lease_missing")
+            return False
+        if not str(command.get("approval_id") or "").strip():
+            self._reject(command_id, "approval_missing")
+            return False
+        if not str(command.get("approval_nonce") or "").strip():
+            self._reject(command_id, "approval_nonce_missing")
+            return False
+        return True
 
     def _check_write_state(self, command: dict[str, Any], before: Any) -> bool:
         state_hash = command.get("state_hash")

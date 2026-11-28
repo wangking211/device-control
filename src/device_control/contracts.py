@@ -30,6 +30,7 @@ SCHEMAS: dict[str, str] = {
     "gateway_receipt": "gateway-receipt.schema.json",
     "gateway_heartbeat": "gateway-heartbeat.schema.json",
     "command": "device-command.schema.json",
+    "command_state": "device-command-status.schema.json",
     "gateway_command": "gateway-command.schema.json",
     "gateway_command_result": "gateway-command-result.schema.json",
     "event": "device-event.schema.json",

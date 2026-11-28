@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-LATEST_VERSION = 9
+LATEST_VERSION = 10
 
 
 @dataclass(frozen=True)
@@ -351,6 +351,15 @@ MIGRATIONS: tuple[Migration, ...] = (    Migration(
             " UNIQUE(tenant_ref, device_id, metric, observed_at, source))",
             "CREATE INDEX IF NOT EXISTS ix_iot_telemetry_device_time "
             "ON iot_telemetry(tenant_ref, device_id, metric, observed_at)",
+        ),
+    ),
+    Migration(
+        10,
+        "dc014_command_provider_status",
+        (
+            "ALTER TABLE device_commands ADD COLUMN provider_status TEXT",
+            "CREATE INDEX IF NOT EXISTS ix_commands_canonical_review "
+            "ON device_commands(tenant_ref, status, provider_status)",
         ),
     ),
 )

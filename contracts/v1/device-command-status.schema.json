@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-platform.local/contracts/device/device-command-status.v1.schema.json",
+  "title": "Device Command Status Projection",
+  "description": "Cross-repo read model. provider_status is the raw Device Control status and remains authoritative; canonical_status is the only value consumers may branch on.",
+  "type": "object",
+  "required": [
+    "contract_version", "command_id", "tenant_id", "provider_status", "canonical_status"
+  ],
+  "properties": {
+    "contract_version": {"const": "dc-command-state/v1"},
+    "command_id": {"type": "string", "minLength": 1},
+    "tenant_id": {"type": ["string", "null"]},
+    "device_id": {"type": ["string", "null"]},
+    "endpoint_id": {"type": ["string", "null"]},
+    "platform_instance_id": {"type": ["string", "null"]},
+    "task_ref": {"type": ["string", "null"]},
+    "run_ref": {"type": ["string", "null"]},
+    "correlation_id": {"type": ["string", "null"]},
+    "idempotency_key": {"type": ["string", "null"]},
+    "provider_status": {"type": ["string", "null"]},
+    "canonical_status": {
+      "enum": [
+        "queued", "waiting_approval", "running", "verifying",
+        "succeeded", "failed", "unknown", "cancelled", "expired"
+      ]
+    },
+    "status_reason": {"type": ["string", "null"]},
+    "verification": {"type": ["object", "null"]},
+    "evidence_refs": {"type": "array", "items": {"type": "string"}},
+    "created_at": {"type": ["string", "null"]},
+    "updated_at": {"type": ["string", "null"]},
+    "completed_at": {"type": ["string", "null"]}
+  },
+  "additionalProperties": false
+}

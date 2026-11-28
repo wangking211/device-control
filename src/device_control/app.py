@@ -21,7 +21,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, Response
 
-from device_control import config, contracts, identity, metrics, policy, store
+from device_control import config, contracts, identity, metrics, policy, status_projection, store
 from device_control import evidence as evidence_store
 from device_control.canonical import (
     approval_binding_digest,
@@ -1130,6 +1130,8 @@ def submit_command(
     return {
         "command_id": command["command_id"],
         "status": command["status"],
+        "provider_status": command.get("provider_status") or command["status"],
+        "canonical_status": status_projection.project_status(command),
         "tenant_ref": command["tenant_ref"],
         "endpoint_id": command["endpoint_id"],
         "gateway_id": command["gateway_id"],
@@ -1149,9 +1151,13 @@ def commands(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     principal = _require_scope(authorization, identity.SCOPE_COMMAND_READ)
-    return {"items": store.list_commands(
+    items = store.list_commands(
         _tenant(principal, tenant_ref), endpoint_id=endpoint_id, status=status, limit=limit
-    )}
+    )
+    for item in items:
+        item["provider_status"] = item.get("provider_status") or item.get("status")
+        item["canonical_status"] = status_projection.project_status(item)
+    return {"items": items}
 
 
 @app.get("/v1/commands/{command_id}", tags=["commands"])
@@ -1167,6 +1173,9 @@ def command_detail(
     if command is None:
         raise hidden()
     _enforce_endpoint_scope(principal, command["endpoint_id"])
+    command["provider_status"] = command.get("provider_status") or command["status"]
+    command["canonical_status"] = status_projection.project_status(command)
+    command["status_contract_version"] = status_projection.CONTRACT_VERSION
     if include == "transitions":
         command["transitions"] = store.command_transitions(tenant, command_id)
     return command
@@ -1187,6 +1196,8 @@ def command_evidence(
     return {
         "command_id": command_id,
         "status": command["status"],
+        "provider_status": command.get("provider_status") or command["status"],
+        "canonical_status": status_projection.project_status(command),
         "evidence_refs": command["evidence_refs"],
         "verification": command["verification"],
         "items": store.list_evidence(tenant, command_id),
@@ -1418,11 +1429,14 @@ def _envelope(command: dict[str, Any]) -> dict[str, Any]:
         "tenant_ref": command["tenant_ref"],
         "endpoint_id": command["endpoint_id"],
         "gateway_id": command["gateway_id"],
+        "platform_instance_id": command.get("platform_instance_id"),
         "task_ref": command.get("task_ref"),
         "run_ref": command.get("run_ref"),
         "correlation_id": command.get("correlation_id"),
         "capability_id": command["capability_id"],
         "capability_version": command["capability_version"],
+        "provider_status": command.get("provider_status") or command["status"],
+        "canonical_status": status_projection.project_status(command),
         "operation": command.get("operation", ""),
         "parameters": command["parameters"],
         "intent": command["intent"],
@@ -1443,6 +1457,15 @@ def _envelope(command: dict[str, Any]) -> dict[str, Any]:
         "attempt": max(1, int(command.get("attempt_count") or 1)),
         "protocol_version": "v1",
     }
+
+
+@app.get("/v1/gateways/{gateway_id}/bindings", tags=["gateways"])
+def gateway_bindings(
+    gateway_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    gateway = _gateway_principal(gateway_id, authorization)
+    return store.gateway_binding_document(gateway["tenant_ref"], gateway_id)
 
 
 @app.get("/v1/gateways/{gateway_id}/commands", tags=["gateways"])
@@ -1505,6 +1528,8 @@ def gateway_result(
         reason=payload.get("reason"),
     )
     metrics.increment(f"command_result_{result['status']}_total")
+    result["provider_status"] = payload["status"]
+    result["canonical_status"] = status_projection.project_status(result)
     return result
 
 

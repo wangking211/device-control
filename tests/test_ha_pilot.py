@@ -16,6 +16,7 @@ from support import (
 
 from device_control import store
 from device_control.app import app
+from device_control.iot.adapters.binding import BindingRegistry
 from device_control.iot.adapters.home_assistant_adapter import HomeAssistantAdapter
 from device_control.iot.adapters.worker import HomeAssistantPilotWorker
 from device_control.iot.spi import PlatformConfig
@@ -99,14 +100,32 @@ class StubControl:
 def worker_command(**overrides):
     payload = {
         "command_id": "cmd-ha-1", "gateway_id": "ha-ha-1", "tenant_ref": "tenant-a",
+        "platform_instance_id": "ha-1",
         "endpoint_id": "ep-ha", "device_id": "ha:tenant-a:light:kitchen",
         "capability_id": "light.turn_on", "capability_version": "1.0.0",
         "operation": "turn_on", "parameters": {"entity_id": "light.kitchen",
                                                "expected_state": "on"},
         "state_hash": None, "state_version": None,
+        "lease_id": "lease-1", "approval_id": "appr-1", "approval_nonce": "nonce-1",
+        "policy_decision": "ask",
     }
     payload.update(overrides)
     return payload
+
+
+def trusted_registry(**bind_overrides):
+    registry = BindingRegistry(
+        tenant_ref="tenant-a", gateway_id="ha-ha-1", platform_instance_id="ha-1",
+    )
+    values = {
+        "entity_id": "light.kitchen", "endpoint_id": "ep-ha",
+        "device_id": "ha:tenant-a:light:kitchen",
+        "capabilities": {"device.observe", "light.turn_on", "light.turn_off",
+                         "light.set_brightness"},
+    }
+    values.update(bind_overrides)
+    registry.bind(**values)
+    return registry
 
 
 def test_worker_write_requires_state_mapping_and_freshness_without_side_effect():
@@ -115,11 +134,7 @@ def test_worker_write_requires_state_mapping_and_freshness_without_side_effect()
     adapter.connect(_config(), lambda ref: TOKEN)
     control = StubControl([worker_command()])
     worker = HomeAssistantPilotWorker(
-        client=control, adapter=adapter, allowed_entities={"light.kitchen"},
-        entity_bindings={"light.kitchen": {"endpoint_id": "ep-ha",
-                                           "device_id": "ha:tenant-a:light:kitchen",
-                                           "platform_instance_id": "ha-1"}},
-        platform_instance_id="ha-1",
+        client=control, adapter=adapter, bindings=trusted_registry(),
     )
     worker.run_once()
     assert control.results[0][1]["status"] == "rejected"
@@ -131,11 +146,7 @@ def test_worker_write_requires_state_mapping_and_freshness_without_side_effect()
                                           state_version=observed.state_version,
                                           endpoint_id="other-endpoint")])
     worker = HomeAssistantPilotWorker(
-        client=control, adapter=adapter, allowed_entities={"light.kitchen"},
-        entity_bindings={"light.kitchen": {"endpoint_id": "ep-ha",
-                                           "device_id": "ha:tenant-a:light:kitchen",
-                                           "platform_instance_id": "ha-1"}},
-        platform_instance_id="ha-1",
+        client=control, adapter=adapter, bindings=trusted_registry(),
     )
     worker.run_once()
     assert control.results[0][1]["reason"] == "endpoint_mapping_mismatch"
@@ -155,11 +166,7 @@ def test_worker_rejects_stale_state_before_service_call():
         endpoint_id="ep-ha",
     )])
     worker = HomeAssistantPilotWorker(
-        client=control, adapter=adapter, allowed_entities={"light.kitchen"},
-        entity_bindings={"light.kitchen": {"endpoint_id": "ep-ha",
-                                           "device_id": "ha:tenant-a:light:kitchen",
-                                           "platform_instance_id": "ha-1"}},
-        platform_instance_id="ha-1",
+        client=control, adapter=adapter, bindings=trusted_registry(),
     )
     worker.run_once()
     assert control.results[0][1]["reason"] == "state_stale"
@@ -265,8 +272,18 @@ def test_home_assistant_pilot_command_executes_and_verifies(tmp_path, monkeypatc
         base_url="http://testserver", gateway_id=created["gateway_id"],
         credential=created["gateway_credential"], transport=InProcessTransport(),
     )
+    document = client.get(
+        f"/v1/gateways/{created['gateway_id']}/bindings",
+        headers=bearer(created["gateway_credential"]),
+    )
+    assert document.status_code == 200, document.text
+    bindings = BindingRegistry(
+        tenant_ref="tenant-a", gateway_id=created["gateway_id"],
+        platform_instance_id="ha-1",
+    )
+    bindings.load_document(document.json())
     worker = HomeAssistantPilotWorker(
-        client=control, adapter=adapter, allowed_entities={"light.kitchen"},
+        client=control, adapter=adapter, bindings=bindings,
     )
     summary = worker.run_once()
     assert summary["executed"] == 1
